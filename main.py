@@ -4,6 +4,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from pybgpstream import BGPStream
+from rich.console import Console
+from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn, TimeElapsedColumn
 
 import download
 
@@ -17,6 +19,7 @@ DATA_DIR = DATA_ROOT / PROJECT / COLLECTOR / "updates"
 DOWNLOAD_WORKERS = download.DEFAULT_WORKERS
 AS_NUMBER_RE = re.compile(r"\d+")
 STATS_REPORT_INTERVAL_SECONDS = 1.0
+RICH_CONSOLE = Console(force_terminal=True)
 
 
 def parse_closed_date_range(start_date: str, end_date: str) -> tuple[datetime, datetime]:
@@ -31,97 +34,83 @@ def extract_as_numbers(as_path: str) -> set[str]:
     return set(AS_NUMBER_RE.findall(as_path))
 
 
-def print_stats_progress(
-    processed_files: int,
-    total_files: int,
-    current_file: str,
-    scanned_update_count: int,
-    usable_update_count: int,
-    unique_prefixes: int,
-    start_time: float,
-    done: bool = False,
-) -> None:
-    elapsed = max(time.time() - start_time, 1e-6)
-    speed = scanned_update_count / elapsed
-    pct = 0.0 if total_files == 0 else processed_files / total_files * 100.0
-    line = (
-        f"\rstats files={processed_files}/{total_files} ({pct:5.1f}%) "
-        f"current={current_file:<40.40} "
-        f"scanned={scanned_update_count} "
-        f"usable={usable_update_count} "
-        f"unique_prefixes={unique_prefixes} "
-        f"speed={speed:,.0f} elem/s"
+def build_stats_progress(total_files: int) -> tuple[Progress, int]:
+    progress = Progress(
+        SpinnerColumn(),
+        TextColumn("[bold cyan]stats[/bold cyan]"),
+        BarColumn(bar_width=None),
+        TaskProgressColumn(),
+        TextColumn("{task.completed}/{task.total} files"),
+        TimeElapsedColumn(),
+        console=RICH_CONSOLE,
+        refresh_per_second=4,
+        expand=True,
+        transient=False,
     )
-    if done:
-        print(line, flush=True)
-    else:
-        print(line, end="", flush=True)
+    task_id = progress.add_task("stats", total=total_files)
+    return progress, task_id
+
+
+def refresh_stats_progress(
+    progress: Progress,
+    task_id: int,
+    processed_files: int,
+) -> None:
+    progress.update(task_id, completed=processed_files)
 
 
 def collect_prefix_stats(files: list[Path], start: datetime, end: datetime) -> tuple[dict[str, set[str]], int, int]:
     start_ts = start.timestamp()
     end_ts = end.timestamp()
     total_files = len(files)
-    stats_start = time.time()
     last_report = 0.0
 
     prefix_to_ases: dict[str, set[str]] = {}
     scanned_update_count = 0
     usable_update_count = 0
 
-    for index, file_path in enumerate(files, start=1):
-        stream = BGPStream(data_interface="singlefile")
-        stream.set_data_interface_option("singlefile", "upd-file", str(file_path))
+    progress, task_id = build_stats_progress(total_files)
+    with progress:
+        for index, file_path in enumerate(files, start=1):
+            stream = BGPStream(data_interface="singlefile")
+            stream.set_data_interface_option("singlefile", "upd-file", str(file_path))
 
-        for elem in stream:
-            if elem.type != "A":
-                continue
-            if not (start_ts <= elem.time < end_ts):
-                continue
+            for elem in stream:
+                now = time.time()
+                if now - last_report >= STATS_REPORT_INTERVAL_SECONDS:
+                    refresh_stats_progress(
+                        progress=progress,
+                        task_id=task_id,
+                        processed_files=index - 1,
+                    )
+                    last_report = now
 
-            scanned_update_count += 1
-            prefix = elem.fields.get("prefix")
-            as_path = elem.fields.get("as-path", "")
-            if not prefix or not as_path:
-                continue
+                if elem.type != "A":
+                    continue
+                if not (start_ts <= elem.time < end_ts):
+                    continue
 
-            usable_update_count += 1
-            prefix_to_ases.setdefault(prefix, set()).update(extract_as_numbers(as_path))
+                scanned_update_count += 1
+                prefix = elem.fields.get("prefix")
+                as_path = elem.fields.get("as-path", "")
+                if not prefix or not as_path:
+                    continue
 
-            now = time.time()
-            if now - last_report >= STATS_REPORT_INTERVAL_SECONDS:
-                print_stats_progress(
-                    processed_files=index - 1,
-                    total_files=total_files,
-                    current_file=file_path.name,
-                    scanned_update_count=scanned_update_count,
-                    usable_update_count=usable_update_count,
-                    unique_prefixes=len(prefix_to_ases),
-                    start_time=stats_start,
-                )
-                last_report = now
+                usable_update_count += 1
+                prefix_to_ases.setdefault(prefix, set()).update(extract_as_numbers(as_path))
 
-        print_stats_progress(
-            processed_files=index,
-            total_files=total_files,
-            current_file=file_path.name,
-            scanned_update_count=scanned_update_count,
-            usable_update_count=usable_update_count,
-            unique_prefixes=len(prefix_to_ases),
-            start_time=stats_start,
+            refresh_stats_progress(
+                progress=progress,
+                task_id=task_id,
+                processed_files=index,
+            )
+            last_report = time.time()
+
+        refresh_stats_progress(
+            progress=progress,
+            task_id=task_id,
+            processed_files=total_files,
         )
-        last_report = time.time()
-
-    print_stats_progress(
-        processed_files=total_files,
-        total_files=total_files,
-        current_file="done",
-        scanned_update_count=scanned_update_count,
-        usable_update_count=usable_update_count,
-        unique_prefixes=len(prefix_to_ases),
-        start_time=stats_start,
-        done=True,
-    )
     return prefix_to_ases, scanned_update_count, usable_update_count
 
 
