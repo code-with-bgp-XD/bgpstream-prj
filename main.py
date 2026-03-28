@@ -9,8 +9,8 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn
 import download
 
 
-START_DATE = "2017-01-01"
-END_DATE = "2018-01-01"
+START_DATE = "2025-11-01"
+END_DATE = "2025-12-01"
 PROJECT = "routeviews"
 COLLECTOR = "route-views.sg"
 DATA_ROOT = Path(download.DEFAULT_DATA_ROOT)

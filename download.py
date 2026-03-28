@@ -12,6 +12,15 @@ from urllib.parse import urlencode, urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+try:
+    from rich.console import Console
+    from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn, TimeElapsedColumn
+except ImportError:
+    Console = None
+    Progress = None
+else:
+    DOWNLOAD_CONSOLE = Console(force_terminal=True)
+
 
 BROKER_URL = "https://broker.bgpstream.caida.org/v2/data"
 ROUTEVIEWS_ARCHIVE_BASE_URL = "https://archive.routeviews.org"
@@ -218,7 +227,7 @@ def download_solution_hint(destination: Path, exc: BaseException) -> str:
         return "建议: 本地磁盘空间不足，先清理磁盘后再重试。"
 
     if "Local partial file is larger than remote file" in message or "Downloaded size mismatch" in message:
-        return f"建议: 删除残留分片文件 {partial} 后重新下载。"
+        return f"建议: 脚本会自动删除残留分片文件 {partial}，下次会从头重新下载该文件。"
 
     return f"建议: 检查网络、磁盘空间和文件权限；如果 {partial.name} 是残留坏分片，删除后再重试。"
 
@@ -475,6 +484,27 @@ def build_progress_tracker(resources: list[Resource], destinations: list[Path], 
     return ProgressTracker(totals=totals, current=current, completed=completed)
 
 
+def build_download_progress(total_files: int):
+    if Progress is None:
+        return None, None
+
+    progress = Progress(
+        SpinnerColumn(),
+        TextColumn("[bold green]download[/bold green]"),
+        BarColumn(bar_width=None),
+        TaskProgressColumn(),
+        TextColumn("{task.completed}/{task.total} files"),
+        TextColumn("{task.fields[downloaded_text]}"),
+        TimeElapsedColumn(),
+        console=DOWNLOAD_CONSOLE,
+        refresh_per_second=4,
+        expand=True,
+        transient=False,
+    )
+    task_id = progress.add_task("download", total=total_files, downloaded_text="0.0 B")
+    return progress, task_id
+
+
 def tracker_snapshot(tracker: ProgressTracker) -> tuple[int, int, int, int, int, int]:
     with tracker.lock:
         downloaded_bytes = sum(tracker.current.values())
@@ -520,7 +550,75 @@ def tracker_mark_paused(tracker: ProgressTracker, key: str, current_bytes: int) 
         tracker.active.discard(key)
 
 
-def print_overall_progress(tracker: ProgressTracker, stop_event: threading.Event) -> None:
+def refresh_download_progress(progress, task_id: int, tracker: ProgressTracker) -> None:
+    if progress is None:
+        return
+
+    downloaded_bytes, total_bytes, known_totals, completed_files, _, total_files = tracker_snapshot(tracker)
+    if known_totals == total_files and total_bytes > 0:
+        downloaded_text = f"{format_bytes(downloaded_bytes)}/{format_bytes(total_bytes)}"
+    else:
+        downloaded_text = format_bytes(downloaded_bytes)
+    progress.update(
+        task_id,
+        completed=min(completed_files, total_files),
+        downloaded_text=downloaded_text,
+    )
+
+
+def emit_download_log(message: str, progress=None) -> None:
+    if progress is not None:
+        progress.console.print(message)
+    else:
+        print(message, flush=True)
+
+
+def should_delete_partial_on_error(exc: BaseException) -> bool:
+    message = summarize_error(exc)
+    return (
+        "Local partial file is larger than remote file" in message
+        or "Downloaded size mismatch" in message
+    )
+
+
+def cleanup_partial_file(destination: Path) -> int:
+    partial = partial_path(destination)
+    if not partial.exists():
+        return 0
+    size = local_size(partial)
+    partial.unlink(missing_ok=True)
+    return size
+
+
+def cleanup_incomplete_downloads(
+    pending: list[tuple[Resource, Path]],
+    *,
+    base_dir: Path,
+    progress=None,
+) -> None:
+    removed_files = 0
+    removed_bytes = 0
+
+    for resource, destination in pending:
+        if available_local_path(base_dir, resource) is not None:
+            continue
+
+        partial = partial_path(destination)
+        if not partial.exists():
+            continue
+
+        removed_bytes += local_size(partial)
+        partial.unlink(missing_ok=True)
+        removed_files += 1
+
+    if removed_files > 0:
+        emit_download_log(
+            f"已清理 {removed_files} 个未完成下载分片，共 {format_bytes(removed_bytes)}。",
+            progress,
+        )
+
+
+def print_overall_progress_plain(tracker: ProgressTracker, stop_event: threading.Event) -> None:
     downloaded_bytes, _, _, _, _, _ = tracker_snapshot(tracker)
     last_bytes = downloaded_bytes
     last_time = time.time()
@@ -578,17 +676,34 @@ def print_overall_progress(tracker: ProgressTracker, stop_event: threading.Event
         last_time = now
 
 
+def drive_download_progress(tracker: ProgressTracker, stop_event: threading.Event, progress=None, task_id: int | None = None) -> None:
+    if progress is None or task_id is None:
+        print_overall_progress_plain(tracker, stop_event)
+        return
+
+    refresh_download_progress(progress, task_id, tracker)
+    while True:
+        if stop_event.wait(0.2):
+            refresh_download_progress(progress, task_id, tracker)
+            return
+        refresh_download_progress(progress, task_id, tracker)
+
+
 def download_resource(
     resource: Resource,
     destination: Path,
     tracker: ProgressTracker,
     base_dir: Path,
+    interrupt_event: threading.Event,
 ) -> None:
     key = str(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     partial = partial_path(destination)
 
     try:
+        if interrupt_event.is_set():
+            raise KeyboardInterrupt("Download interrupted by user")
+
         cache_path = cache_artifact_path(base_dir, resource)
 
         if cache_path.exists():
@@ -645,6 +760,8 @@ def download_resource(
             current_bytes = resume_from
             with partial.open(mode) as output:
                 while True:
+                    if interrupt_event.is_set():
+                        raise KeyboardInterrupt("Download interrupted by user")
                     chunk = response.read(CHUNK_SIZE)
                     if not chunk:
                         break
@@ -660,8 +777,12 @@ def download_resource(
 
         partial.replace(destination)
         tracker_mark_completed(tracker, key)
-    except Exception:
-        tracker_mark_paused(tracker, key, local_size(partial))
+    except BaseException as exc:
+        if should_delete_partial_on_error(exc):
+            cleanup_partial_file(destination)
+            tracker_mark_paused(tracker, key, 0)
+        else:
+            tracker_mark_paused(tracker, key, local_size(partial))
         raise
 
 
@@ -671,21 +792,29 @@ def run_download_round(
     workers: int,
     tracker: ProgressTracker,
     base_dir: Path,
+    interrupt_event: threading.Event,
+    progress=None,
 ) -> list[tuple[Resource, Path, BaseException]]:
     failures: list[tuple[Resource, Path, BaseException]] = []
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
-            executor.submit(download_resource, resource, destination, tracker, base_dir): (resource, destination)
+            executor.submit(download_resource, resource, destination, tracker, base_dir, interrupt_event): (resource, destination)
             for resource, destination in pending
         }
-        for future in as_completed(futures):
-            resource, destination = futures[future]
-            try:
-                future.result()
-            except Exception as exc:
-                failures.append((resource, destination, exc))
-                print("\n" + format_download_failure(resource, destination, exc), flush=True)
+        try:
+            for future in as_completed(futures):
+                resource, destination = futures[future]
+                try:
+                    future.result()
+                except Exception as exc:
+                    failures.append((resource, destination, exc))
+                    emit_download_log(format_download_failure(resource, destination, exc), progress)
+        except KeyboardInterrupt:
+            interrupt_event.set()
+            for future in futures:
+                future.cancel()
+            raise
 
     return failures
 
@@ -765,13 +894,19 @@ def run_download(
         raise SystemExit("--workers must be at least 1")
 
     tracker = build_progress_tracker(resources, destinations, base_dir)
+    progress, task_id = build_download_progress(len(resources))
     stop_event = threading.Event()
+    interrupt_event = threading.Event()
     progress_thread = threading.Thread(
-        target=print_overall_progress,
-        args=(tracker, stop_event),
+        target=drive_download_progress,
+        args=(tracker, stop_event, progress, task_id),
         daemon=True,
     )
+    if progress is not None:
+        progress.start()
     progress_thread.start()
+    pending: list[tuple[Resource, Path]] = []
+    interrupted = False
 
     try:
         pending = [
@@ -781,7 +916,7 @@ def run_download(
         ]
 
         if not pending:
-            print("all matched files already cached locally", flush=True)
+            emit_download_log("all matched files already cached locally", progress)
             return [path for resource in resources if (path := available_local_path(base_dir, resource)) is not None]
 
         failures = run_download_round(
@@ -789,6 +924,8 @@ def run_download(
             workers=workers,
             tracker=tracker,
             base_dir=base_dir,
+            interrupt_event=interrupt_event,
+            progress=progress,
         )
 
         for retry_round in range(1, retries + 1):
@@ -796,11 +933,9 @@ def run_download(
                 break
 
             delay = retry_delay_seconds(retry_round)
-            print(
-                "\n"
-                f"补下载轮次 {retry_round}/{retries}: 共有 {len(failures)} 个失败文件，"
-                f"等待 {delay:.1f}s 后重试。",
-                flush=True,
+            emit_download_log(
+                f"补下载轮次 {retry_round}/{retries}: 共有 {len(failures)} 个失败文件，等待 {delay:.1f}s 后重试。",
+                progress,
             )
             time.sleep(delay)
 
@@ -809,15 +944,32 @@ def run_download(
                 workers=workers,
                 tracker=tracker,
                 base_dir=base_dir,
+                interrupt_event=interrupt_event,
+                progress=progress,
             )
 
         if failures:
-            print(f"\n最终跳过 {len(failures)} 个下载失败文件:", flush=True)
+            emit_download_log(f"最终跳过 {len(failures)} 个下载失败文件:", progress)
             for resource, destination, exc in failures:
-                print(format_download_failure(resource, destination, exc), flush=True)
+                cleaned_bytes = cleanup_partial_file(destination)
+                if cleaned_bytes > 0:
+                    emit_download_log(
+                        f"已删除失败文件的残留分片: {destination.name}.part ({format_bytes(cleaned_bytes)})",
+                        progress,
+                    )
+                emit_download_log(format_download_failure(resource, destination, exc), progress)
+    except KeyboardInterrupt:
+        interrupted = True
+        interrupt_event.set()
+        emit_download_log("收到 Ctrl+C，正在停止下载并清理未完成分片...", progress)
+        raise
     finally:
         stop_event.set()
         progress_thread.join()
+        if interrupted and pending:
+            cleanup_incomplete_downloads(pending, base_dir=base_dir, progress=progress)
+        if progress is not None:
+            progress.stop()
 
     print("download complete")
     return [path for resource in resources if (path := available_local_path(base_dir, resource)) is not None]
