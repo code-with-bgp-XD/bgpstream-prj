@@ -19,7 +19,7 @@ CHUNK_SIZE = 1024 * 1024
 DEFAULT_DATA_ROOT = "bgpdata"
 DEFAULT_WORKERS = 32
 REQUEST_TIMEOUT_SECONDS = 60
-DEFAULT_RETRIES = 6
+DEFAULT_RETRIES = 3
 INITIAL_RETRY_DELAY_SECONDS = 1.0
 MAX_RETRY_DELAY_SECONDS = 10.0
 
@@ -65,7 +65,12 @@ def parse_args() -> argparse.Namespace:
         help="Probe every remote file size before downloading. Slower startup, but total size is known upfront.",
     )
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS, help="Number of files to download in parallel")
-    parser.add_argument("--retries", type=int, default=DEFAULT_RETRIES, help="Retries per file for transient network failures")
+    parser.add_argument(
+        "--retries",
+        type=int,
+        default=DEFAULT_RETRIES,
+        help="Retry rounds after the initial pass for files that failed earlier",
+    )
     parser.add_argument("--output-dir", default=DEFAULT_DATA_ROOT, help="Shared data root where files will be stored")
     parser.add_argument("--limit", type=int, default=None, help="Only download the first N matched resources")
     parser.add_argument("--dry-run", action="store_true", help="Only list matched resources, do not download")
@@ -186,6 +191,43 @@ def is_retryable_error(exc: BaseException) -> bool:
 
 def retry_delay_seconds(attempt: int) -> float:
     return min(INITIAL_RETRY_DELAY_SECONDS * (2 ** max(attempt - 1, 0)), MAX_RETRY_DELAY_SECONDS)
+
+
+def summarize_error(exc: BaseException) -> str:
+    root = root_cause(exc)
+    text = str(root).strip()
+    return text if text else root.__class__.__name__
+
+
+def download_solution_hint(destination: Path, exc: BaseException) -> str:
+    root = root_cause(exc)
+    partial = partial_path(destination)
+    message = summarize_error(exc)
+
+    if isinstance(root, HTTPError):
+        if root.code == 404:
+            return "建议: 先确认 collector、时间范围和 record_type 是否正确；这个时间片的归档文件可能本来就不存在。"
+        if root.code in {429, 500, 502, 503, 504}:
+            return "建议: 上游暂时不可用或限流，稍后重试，或降低 --workers。"
+        return "建议: 检查远端归档服务是否可访问，以及请求参数是否正确。"
+
+    if isinstance(root, (ssl.SSLError, URLError, socket.timeout, TimeoutError, ConnectionError)):
+        return "建议: 检查网络、代理和防火墙，必要时降低 --workers 后重试。"
+
+    if isinstance(root, OSError) and getattr(root, "errno", None) == 28:
+        return "建议: 本地磁盘空间不足，先清理磁盘后再重试。"
+
+    if "Local partial file is larger than remote file" in message or "Downloaded size mismatch" in message:
+        return f"建议: 删除残留分片文件 {partial} 后重新下载。"
+
+    return f"建议: 检查网络、磁盘空间和文件权限；如果 {partial.name} 是残留坏分片，删除后再重试。"
+
+
+def format_download_failure(resource: Resource, destination: Path, exc: BaseException) -> str:
+    return (
+        f"下载失败: {destination.name} | {summarize_error(exc)} | "
+        f"{download_solution_hint(destination, exc)}"
+    )
 
 
 def probe_remote_size(url: str) -> int:
@@ -376,6 +418,18 @@ def preferred_local_path(base_dir: Path, resource: Resource) -> Path:
     return destination_path(base_dir, resource)
 
 
+def available_local_path(base_dir: Path, resource: Resource) -> Path | None:
+    cache_path = cache_artifact_path(base_dir, resource)
+    if cache_path.exists():
+        return cache_path
+
+    destination = destination_path(base_dir, resource)
+    if destination.exists():
+        return destination
+
+    return None
+
+
 def local_size(path: Path) -> int:
     if not path.exists():
         return 0
@@ -460,6 +514,12 @@ def tracker_mark_completed(tracker: ProgressTracker, key: str) -> None:
         tracker.completed.add(key)
 
 
+def tracker_mark_paused(tracker: ProgressTracker, key: str, current_bytes: int) -> None:
+    with tracker.lock:
+        tracker.current[key] = current_bytes
+        tracker.active.discard(key)
+
+
 def print_overall_progress(tracker: ProgressTracker, stop_event: threading.Event) -> None:
     downloaded_bytes, _, _, _, _, _ = tracker_snapshot(tracker)
     last_bytes = downloaded_bytes
@@ -523,102 +583,111 @@ def download_resource(
     destination: Path,
     tracker: ProgressTracker,
     base_dir: Path,
-    retries: int,
 ) -> None:
     key = str(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     partial = partial_path(destination)
 
-    for attempt in range(1, retries + 2):
-        try:
-            cache_path = cache_artifact_path(base_dir, resource)
+    try:
+        cache_path = cache_artifact_path(base_dir, resource)
 
-            if cache_path.exists():
-                tracker_mark_completed(tracker, key)
-                return
+        if cache_path.exists():
+            tracker_mark_completed(tracker, key)
+            return
 
-            # Finalized archive files are immutable; if they already exist locally, treat them as a cache hit.
-            if destination.exists():
-                tracker_mark_completed(tracker, key)
-                return
+        # Finalized archive files are immutable; if they already exist locally, treat them as a cache hit.
+        if destination.exists():
+            tracker_mark_completed(tracker, key)
+            return
 
-            existing = local_size(partial)
+        existing = local_size(partial)
 
-            if resource.remote_size > 0 and existing > resource.remote_size:
-                raise RuntimeError(f"Local partial file is larger than remote file: {partial}")
+        if resource.remote_size > 0 and existing > resource.remote_size:
+            raise RuntimeError(f"Local partial file is larger than remote file: {partial}")
 
-            if resource.remote_size == 0 and existing > 0:
-                resource.remote_size = probe_remote_size(resource.url)
-                tracker_set_total(tracker, key, resource.remote_size)
+        if resource.remote_size == 0 and existing > 0:
+            resource.remote_size = probe_remote_size(resource.url)
+            tracker_set_total(tracker, key, resource.remote_size)
 
-            if resource.remote_size > 0 and existing == resource.remote_size:
-                partial.replace(destination)
-                tracker_mark_completed(tracker, key)
-                return
-
-            headers = {"Accept-Encoding": "identity"}
-            mode = "wb"
-            resume_from = existing
-
-            if existing > 0:
-                headers["Range"] = f"bytes={existing}-"
-                mode = "ab"
-
-            tracker_mark_started(tracker, key, existing)
-            request = Request(resource.url, headers=headers)
-            with open_url(request) as response:
-                status = getattr(response, "status", 200)
-                content_range = response.headers.get("Content-Range")
-                content_length = response.headers.get("Content-Length")
-
-                if resource.remote_size == 0:
-                    if content_range and "/" in content_range:
-                        resource.remote_size = int(content_range.rsplit("/", 1)[1])
-                    elif content_length is not None:
-                        resource.remote_size = existing + int(content_length) if status == 206 else int(content_length)
-                    if resource.remote_size > 0:
-                        tracker_set_total(tracker, key, resource.remote_size)
-
-                if existing > 0 and status != 206:
-                    resume_from = 0
-                    mode = "wb"
-                    tracker_update_bytes(tracker, key, 0)
-
-                current_bytes = resume_from
-                with partial.open(mode) as output:
-                    while True:
-                        chunk = response.read(CHUNK_SIZE)
-                        if not chunk:
-                            break
-                        output.write(chunk)
-                        current_bytes += len(chunk)
-                        tracker_update_bytes(tracker, key, current_bytes)
-
-            final_size = local_size(partial)
-            if resource.remote_size > 0 and final_size != resource.remote_size:
-                raise RuntimeError(
-                    f"Downloaded size mismatch for {partial}: got {final_size}, expected {resource.remote_size}"
-                )
-
+        if resource.remote_size > 0 and existing == resource.remote_size:
             partial.replace(destination)
             tracker_mark_completed(tracker, key)
             return
-        except Exception as exc:
-            if attempt > retries or not is_retryable_error(exc):
-                raise
 
-            current_size = local_size(partial)
-            tracker_update_bytes(tracker, key, current_size)
-            delay = retry_delay_seconds(attempt)
-            print(
-                "\n"
-                f"retry {attempt}/{retries} for {destination.name}: "
-                f"{explain_request_error(resource.url, exc)} "
-                f"resuming_from={format_bytes(current_size)} "
-                f"wait={delay:.1f}s",
-                flush=True,
+        headers = {"Accept-Encoding": "identity"}
+        mode = "wb"
+        resume_from = existing
+
+        if existing > 0:
+            headers["Range"] = f"bytes={existing}-"
+            mode = "ab"
+
+        tracker_mark_started(tracker, key, existing)
+        request = Request(resource.url, headers=headers)
+        with open_url(request) as response:
+            status = getattr(response, "status", 200)
+            content_range = response.headers.get("Content-Range")
+            content_length = response.headers.get("Content-Length")
+
+            if resource.remote_size == 0:
+                if content_range and "/" in content_range:
+                    resource.remote_size = int(content_range.rsplit("/", 1)[1])
+                elif content_length is not None:
+                    resource.remote_size = existing + int(content_length) if status == 206 else int(content_length)
+                if resource.remote_size > 0:
+                    tracker_set_total(tracker, key, resource.remote_size)
+
+            if existing > 0 and status != 206:
+                resume_from = 0
+                mode = "wb"
+                tracker_update_bytes(tracker, key, 0)
+
+            current_bytes = resume_from
+            with partial.open(mode) as output:
+                while True:
+                    chunk = response.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    output.write(chunk)
+                    current_bytes += len(chunk)
+                    tracker_update_bytes(tracker, key, current_bytes)
+
+        final_size = local_size(partial)
+        if resource.remote_size > 0 and final_size != resource.remote_size:
+            raise RuntimeError(
+                f"Downloaded size mismatch for {partial}: got {final_size}, expected {resource.remote_size}"
             )
-            time.sleep(delay)
+
+        partial.replace(destination)
+        tracker_mark_completed(tracker, key)
+    except Exception:
+        tracker_mark_paused(tracker, key, local_size(partial))
+        raise
+
+
+def run_download_round(
+    pending: list[tuple[Resource, Path]],
+    *,
+    workers: int,
+    tracker: ProgressTracker,
+    base_dir: Path,
+) -> list[tuple[Resource, Path, BaseException]]:
+    failures: list[tuple[Resource, Path, BaseException]] = []
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(download_resource, resource, destination, tracker, base_dir): (resource, destination)
+            for resource, destination in pending
+        }
+        for future in as_completed(futures):
+            resource, destination = futures[future]
+            try:
+                future.result()
+            except Exception as exc:
+                failures.append((resource, destination, exc))
+                print("\n" + format_download_failure(resource, destination, exc), flush=True)
+
+    return failures
 
 
 def run_download(
@@ -674,7 +743,7 @@ def run_download(
     print(f"source: {source_name}")
     print(f"probe_size: {probe_size}")
     print(f"workers: {workers}")
-    print(f"retries: {retries}")
+    print(f"retry_rounds: {retries}")
     print(f"matched_files: {len(resources)}")
     if probe_size:
         print(f"total_remote_size: {format_bytes(known_remote_size)}")
@@ -713,21 +782,45 @@ def run_download(
 
         if not pending:
             print("all matched files already cached locally", flush=True)
-            return [preferred_local_path(base_dir, resource) for resource in resources]
+            return [path for resource in resources if (path := available_local_path(base_dir, resource)) is not None]
 
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = [
-                executor.submit(download_resource, resource, destination, tracker, base_dir, retries)
-                for resource, destination in pending
-            ]
-            for future in as_completed(futures):
-                future.result()
+        failures = run_download_round(
+            pending,
+            workers=workers,
+            tracker=tracker,
+            base_dir=base_dir,
+        )
+
+        for retry_round in range(1, retries + 1):
+            if not failures:
+                break
+
+            delay = retry_delay_seconds(retry_round)
+            print(
+                "\n"
+                f"补下载轮次 {retry_round}/{retries}: 共有 {len(failures)} 个失败文件，"
+                f"等待 {delay:.1f}s 后重试。",
+                flush=True,
+            )
+            time.sleep(delay)
+
+            failures = run_download_round(
+                [(resource, destination) for resource, destination, _ in failures],
+                workers=workers,
+                tracker=tracker,
+                base_dir=base_dir,
+            )
+
+        if failures:
+            print(f"\n最终跳过 {len(failures)} 个下载失败文件:", flush=True)
+            for resource, destination, exc in failures:
+                print(format_download_failure(resource, destination, exc), flush=True)
     finally:
         stop_event.set()
         progress_thread.join()
 
     print("download complete")
-    return [preferred_local_path(base_dir, resource) for resource in resources]
+    return [path for resource in resources if (path := available_local_path(base_dir, resource)) is not None]
 
 
 def main() -> None:
