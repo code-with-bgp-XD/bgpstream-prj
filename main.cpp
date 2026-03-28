@@ -7,12 +7,14 @@ extern "C" {
 #include <cstdlib>
 #include <cstring>
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <ctime>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -25,6 +27,8 @@ extern "C" {
 #include <utility>
 #include <vector>
 
+#include <curses.h>
+
 namespace fs = std::filesystem;
 
 namespace {
@@ -35,6 +39,11 @@ constexpr const char *kProject = "routeviews";
 constexpr const char *kCollector = "route-views.sg";
 constexpr const char *kDataRoot = "bgpdata";
 constexpr int kDownloadWorkers = 32;
+constexpr int kDefaultStatsBatchSize = 5;
+
+int default_stats_workers() {
+  return 8;
+}
 
 struct Config {
   std::string start_date = kStartDate;
@@ -43,6 +52,8 @@ struct Config {
   std::string collector = kCollector;
   fs::path output_dir = kDataRoot;
   int download_workers = kDownloadWorkers;
+  int stats_workers = default_stats_workers();
+  int stats_batch_size = kDefaultStatsBatchSize;
   int limit = -1;
 };
 
@@ -62,23 +73,154 @@ struct FileStats {
   std::uint64_t usable_update_count = 0;
 };
 
-struct AggregateStats {
-  std::unordered_map<std::string, std::unordered_set<uint32_t>> prefix_to_ases;
+struct StatsSummary {
   std::uint64_t scanned_update_count = 0;
   std::uint64_t usable_update_count = 0;
   std::uint64_t skipped_parse_files = 0;
+  std::uint64_t unique_prefixes = 0;
+  std::uint64_t prefix_scoped_as_total = 0;
 };
 
-struct StatsProgressTracker {
-  std::size_t total_files = 0;
-  std::uint64_t total_bytes = 0;
-  std::atomic<std::size_t> completed_files{0};
-  std::atomic<std::uint64_t> completed_bytes{0};
-  std::atomic<bool> stop_requested{false};
-  std::chrono::steady_clock::time_point started_at = std::chrono::steady_clock::now();
-  mutable std::mutex state_mutex;
-  std::size_t active_file_index = 0;
-  std::string active_file_name;
+constexpr std::size_t kAggregateShardCount = 64;
+
+struct AggregateShard {
+  std::mutex mutex;
+  std::unordered_map<std::string, std::unordered_set<uint32_t>> prefix_to_ases;
+};
+
+struct ConcurrentAggregate {
+  std::vector<AggregateShard> shards = std::vector<AggregateShard>(kAggregateShardCount);
+  std::atomic<std::uint64_t> scanned_update_count{0};
+  std::atomic<std::uint64_t> usable_update_count{0};
+  std::atomic<std::uint64_t> skipped_parse_files{0};
+};
+
+std::string format_bytes(std::uint64_t num_bytes);
+std::string format_elapsed(std::chrono::seconds elapsed);
+
+class StatsProgressDisplay {
+ public:
+  StatsProgressDisplay(std::size_t total_files, std::uint64_t total_bytes)
+      : total_files_(total_files),
+        total_bytes_(total_bytes),
+        started_at_(std::chrono::steady_clock::now()) {
+    const char *term = std::getenv("TERM");
+    use_curses_ = (::isatty(STDOUT_FILENO) == 1 && term != nullptr &&
+                   std::string_view(term) != "dumb");
+
+    if (use_curses_) {
+      initscr();
+      cbreak();
+      noecho();
+      curs_set(0);
+      scrollok(stdscr, FALSE);
+      render_locked();
+    } else {
+      render_locked();
+    }
+  }
+
+  StatsProgressDisplay(const StatsProgressDisplay &) = delete;
+  StatsProgressDisplay &operator=(const StatsProgressDisplay &) = delete;
+
+  ~StatsProgressDisplay() {
+    close();
+  }
+
+  void mark_batch_completed(std::size_t completed_files, std::uint64_t completed_bytes) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    completed_files_ += completed_files;
+    completed_bytes_ += completed_bytes;
+    render_locked();
+  }
+
+  void finish() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    close_locked();
+  }
+
+  void close() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    close_locked();
+  }
+
+ private:
+  std::string build_line_locked() const {
+    static constexpr std::size_t kBarWidth = 36;
+    const double fraction =
+        total_files_ == 0 ? 1.0 : static_cast<double>(completed_files_) / total_files_;
+    const std::size_t filled =
+        static_cast<std::size_t>(fraction * static_cast<double>(kBarWidth));
+    const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now() - started_at_);
+
+    std::ostringstream output;
+    output << "stats [";
+    for (std::size_t index = 0; index < kBarWidth; ++index) {
+      if (index < filled) {
+        output << '=';
+      } else if (index == filled && completed_files_ < total_files_) {
+        output << '>';
+      } else {
+        output << ' ';
+      }
+    }
+    output << "] " << std::fixed << std::setprecision(1) << (fraction * 100.0) << "% "
+           << completed_files_ << "/" << total_files_ << " files "
+           << format_bytes(completed_bytes_) << "/" << format_bytes(total_bytes_)
+           << " elapsed=" << format_elapsed(elapsed);
+    return output.str();
+  }
+
+  void render_locked() {
+    const std::string line = build_line_locked();
+    last_line_ = line;
+
+    if (use_curses_ && !closed_) {
+      erase();
+      attron(A_BOLD);
+      mvaddnstr(0, 0, line.c_str(), COLS > 0 ? COLS - 1 : static_cast<int>(line.size()));
+      attroff(A_BOLD);
+      clrtoeol();
+      refresh();
+      return;
+    }
+
+    const std::size_t padding =
+        last_rendered_width_ > line.size() ? last_rendered_width_ - line.size() : 0;
+    std::cout << '\r' << line;
+    if (padding > 0) {
+      std::cout << std::string(padding, ' ');
+    }
+    std::cout << std::flush;
+    last_rendered_width_ = line.size();
+  }
+
+  void close_locked() {
+    if (closed_) {
+      return;
+    }
+    closed_ = true;
+
+    if (use_curses_) {
+      endwin();
+      std::cout << last_line_ << '\n';
+      return;
+    }
+
+    std::cout << '\n';
+  }
+
+  const std::size_t total_files_;
+  const std::uint64_t total_bytes_;
+  const std::chrono::steady_clock::time_point started_at_;
+  std::mutex mutex_;
+  std::size_t completed_files_ = 0;
+  std::uint64_t completed_bytes_ = 0;
+  std::size_t last_rendered_width_ = 0;
+  std::string last_line_;
+  bool use_curses_ = false;
+  bool closed_ = false;
 };
 
 [[noreturn]] void print_usage_and_exit(const char *program, int exit_code) {
@@ -91,6 +233,8 @@ struct StatsProgressTracker {
       << "  --collector NAME\n"
       << "  --output-dir PATH\n"
       << "  --download-workers N\n"
+      << "  --stats-workers N\n"
+      << "  --stats-batch-size N\n"
       << "  --limit N\n"
       << "  --help\n";
   std::exit(exit_code);
@@ -120,6 +264,10 @@ Config parse_args(int argc, char **argv) {
       config.output_dir = require_value("--output-dir");
     } else if (arg == "--download-workers") {
       config.download_workers = std::stoi(require_value("--download-workers"));
+    } else if (arg == "--stats-workers") {
+      config.stats_workers = std::stoi(require_value("--stats-workers"));
+    } else if (arg == "--stats-batch-size") {
+      config.stats_batch_size = std::stoi(require_value("--stats-batch-size"));
     } else if (arg == "--limit") {
       config.limit = std::stoi(require_value("--limit"));
     } else if (arg == "--help" || arg == "-h") {
@@ -131,6 +279,12 @@ Config parse_args(int argc, char **argv) {
 
   if (config.download_workers < 1) {
     throw std::runtime_error("--download-workers must be at least 1");
+  }
+  if (config.stats_workers < 1) {
+    throw std::runtime_error("--stats-workers must be at least 1");
+  }
+  if (config.stats_batch_size < 1) {
+    throw std::runtime_error("--stats-batch-size must be at least 1");
   }
   if (config.limit == 0 || config.limit < -1) {
     throw std::runtime_error("--limit must be positive, or omitted");
@@ -184,92 +338,12 @@ std::uint64_t safe_file_size(const fs::path &file_path) {
   return size;
 }
 
-void initialize_stats_progress_tracker(StatsProgressTracker *tracker,
-                                       const std::vector<fs::path> &files) {
-  tracker->total_files = files.size();
-  tracker->total_bytes = 0;
-  tracker->started_at = std::chrono::steady_clock::now();
+std::uint64_t total_file_bytes(const std::vector<fs::path> &files) {
+  std::uint64_t total_bytes = 0;
   for (const fs::path &file_path : files) {
-    tracker->total_bytes += safe_file_size(file_path);
+    total_bytes += safe_file_size(file_path);
   }
-}
-
-void stats_tracker_set_active_file(StatsProgressTracker *tracker,
-                                   std::size_t file_index,
-                                   const fs::path &file_path) {
-  std::lock_guard<std::mutex> lock(tracker->state_mutex);
-  tracker->active_file_index = file_index + 1;
-  tracker->active_file_name = file_path.filename().string();
-}
-
-void stats_tracker_mark_file_finished(StatsProgressTracker *tracker,
-                                      const fs::path &file_path) {
-  tracker->completed_files.fetch_add(1, std::memory_order_relaxed);
-  tracker->completed_bytes.fetch_add(safe_file_size(file_path), std::memory_order_relaxed);
-}
-
-std::string build_stats_progress_line(const StatsProgressTracker &tracker) {
-  static constexpr std::size_t kBarWidth = 32;
-
-  const std::size_t completed_files = tracker.completed_files.load(std::memory_order_relaxed);
-  const std::uint64_t completed_bytes = tracker.completed_bytes.load(std::memory_order_relaxed);
-  const double fraction =
-      tracker.total_files == 0 ? 1.0 : static_cast<double>(completed_files) / tracker.total_files;
-  const auto filled =
-      static_cast<std::size_t>(fraction * static_cast<double>(kBarWidth));
-  const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-      std::chrono::steady_clock::now() - tracker.started_at);
-
-  std::size_t active_file_index = 0;
-  std::string active_file_name;
-  {
-    std::lock_guard<std::mutex> lock(tracker.state_mutex);
-    active_file_index = tracker.active_file_index;
-    active_file_name = tracker.active_file_name;
-  }
-
-  std::ostringstream output;
-  output << "stats [";
-  for (std::size_t index = 0; index < kBarWidth; ++index) {
-    output << (index < filled ? '#' : '-');
-  }
-  output << "] " << std::fixed << std::setprecision(1) << (fraction * 100.0) << "% "
-         << completed_files << "/" << tracker.total_files << " files "
-         << format_bytes(completed_bytes) << "/" << format_bytes(tracker.total_bytes)
-         << " elapsed=" << format_elapsed(elapsed);
-
-  if (!active_file_name.empty() && completed_files < tracker.total_files) {
-    output << " current=" << active_file_index << "/" << tracker.total_files
-           << " " << active_file_name;
-  }
-
-  return output.str();
-}
-
-void drive_stats_progress(const StatsProgressTracker *tracker) {
-  const bool is_tty = ::isatty(STDOUT_FILENO) == 1;
-  auto last_non_tty_emit = std::chrono::steady_clock::now() - std::chrono::seconds(10);
-
-  while (!tracker->stop_requested.load(std::memory_order_relaxed)) {
-    const std::string line = build_stats_progress_line(*tracker);
-    if (is_tty) {
-      std::cout << '\r' << line << std::string(8, ' ') << std::flush;
-    } else {
-      const auto now = std::chrono::steady_clock::now();
-      if (now - last_non_tty_emit >= std::chrono::seconds(5)) {
-        std::cout << line << '\n' << std::flush;
-        last_non_tty_emit = now;
-      }
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-  }
-
-  const std::string final_line = build_stats_progress_line(*tracker);
-  if (is_tty) {
-    std::cout << '\r' << final_line << std::string(8, ' ') << '\n';
-  } else {
-    std::cout << final_line << '\n';
-  }
+  return total_bytes;
 }
 
 std::string shell_escape(std::string_view value) {
@@ -580,47 +654,134 @@ FileStats collect_file_prefix_stats(const fs::path &file_path,
   }
 }
 
-AggregateStats collect_prefix_stats(const std::vector<fs::path> &files,
-                                    std::time_t start_epoch,
-                                    std::time_t end_exclusive_epoch) {
-  AggregateStats aggregate;
-  StatsProgressTracker tracker;
-  initialize_stats_progress_tracker(&tracker, files);
-  std::thread progress_thread(drive_stats_progress, &tracker);
+void merge_file_stats_into_concurrent_aggregate(ConcurrentAggregate *aggregate,
+                                                FileStats &&file_stats) {
+  aggregate->scanned_update_count.fetch_add(
+      file_stats.scanned_update_count, std::memory_order_relaxed);
+  aggregate->usable_update_count.fetch_add(
+      file_stats.usable_update_count, std::memory_order_relaxed);
+
+  for (auto &entry : file_stats.prefix_to_ases) {
+    const std::size_t shard_index =
+        std::hash<std::string>{}(entry.first) % aggregate->shards.size();
+    AggregateShard &shard = aggregate->shards[shard_index];
+    std::lock_guard<std::mutex> lock(shard.mutex);
+    auto &merged = shard.prefix_to_ases[entry.first];
+    merged.insert(entry.second.begin(), entry.second.end());
+  }
+}
+
+StatsSummary finalize_concurrent_aggregate(ConcurrentAggregate &&aggregate) {
+  StatsSummary summary;
+  summary.scanned_update_count =
+      aggregate.scanned_update_count.load(std::memory_order_relaxed);
+  summary.usable_update_count =
+      aggregate.usable_update_count.load(std::memory_order_relaxed);
+  summary.skipped_parse_files =
+      aggregate.skipped_parse_files.load(std::memory_order_relaxed);
+
+  for (AggregateShard &shard : aggregate.shards) {
+    summary.unique_prefixes += shard.prefix_to_ases.size();
+    for (const auto &entry : shard.prefix_to_ases) {
+      summary.prefix_scoped_as_total += entry.second.size();
+    }
+  }
+
+  return summary;
+}
+
+StatsSummary collect_prefix_stats(const std::vector<fs::path> &files,
+                                  std::time_t start_epoch,
+                                  std::time_t end_exclusive_epoch,
+                                  int stats_workers,
+                                  int stats_batch_size) {
+  ConcurrentAggregate aggregate;
+  StatsProgressDisplay progress_display(files.size(), total_file_bytes(files));
+  const std::size_t worker_count = std::min<std::size_t>(files.size(), stats_workers);
 
   try {
-    const std::size_t total_files = files.size();
+    std::atomic<std::size_t> next_file_index{0};
+    std::mutex parse_failures_mutex;
+    std::mutex fatal_error_mutex;
+    std::exception_ptr fatal_error;
+    std::vector<std::string> parse_failures;
+    std::vector<std::thread> workers;
+    workers.reserve(worker_count);
 
-    for (std::size_t index = 0; index < total_files; ++index) {
-      const fs::path &file_path = files[index];
-      stats_tracker_set_active_file(&tracker, index, file_path);
+    for (std::size_t worker_index = 0; worker_index < worker_count; ++worker_index) {
+      (void)worker_index;
+      workers.emplace_back([&]() {
+        try {
+          while (true) {
+            const std::size_t batch_start =
+                next_file_index.fetch_add(stats_batch_size, std::memory_order_relaxed);
+            if (batch_start >= files.size()) {
+              break;
+            }
 
-      try {
-        FileStats file_stats =
-            collect_file_prefix_stats(file_path, start_epoch, end_exclusive_epoch);
-        aggregate.scanned_update_count += file_stats.scanned_update_count;
-        aggregate.usable_update_count += file_stats.usable_update_count;
+            const std::size_t batch_end =
+                std::min(batch_start + static_cast<std::size_t>(stats_batch_size), files.size());
+            std::size_t batch_completed_files = 0;
+            std::uint64_t batch_completed_bytes = 0;
 
-        // Keep file-local accumulation until the file fully succeeds, matching the
-        // all-or-nothing merge behavior in the original Python code.
-        for (auto &entry : file_stats.prefix_to_ases) {
-          auto &target = aggregate.prefix_to_ases[entry.first];
-          target.insert(entry.second.begin(), entry.second.end());
+            try {
+              for (std::size_t file_index = batch_start; file_index < batch_end; ++file_index) {
+                const fs::path &file_path = files[file_index];
+                std::optional<FileStats> file_stats;
+                try {
+                  file_stats = collect_file_prefix_stats(
+                      file_path, start_epoch, end_exclusive_epoch);
+                } catch (const std::exception &exc) {
+                  aggregate.skipped_parse_files.fetch_add(1, std::memory_order_relaxed);
+                  std::lock_guard<std::mutex> lock(parse_failures_mutex);
+                  parse_failures.push_back(format_parse_failure(file_path, exc.what()));
+                }
+
+                if (file_stats.has_value()) {
+                  merge_file_stats_into_concurrent_aggregate(
+                      &aggregate, std::move(*file_stats));
+                }
+
+                batch_completed_files += 1;
+                batch_completed_bytes += safe_file_size(file_path);
+              }
+            } catch (...) {
+              if (batch_completed_files > 0) {
+                progress_display.mark_batch_completed(
+                    batch_completed_files, batch_completed_bytes);
+              }
+              throw;
+            }
+
+            if (batch_completed_files > 0) {
+              progress_display.mark_batch_completed(
+                  batch_completed_files, batch_completed_bytes);
+            }
+          }
+        } catch (...) {
+          std::lock_guard<std::mutex> lock(fatal_error_mutex);
+          if (fatal_error == nullptr) {
+            fatal_error = std::current_exception();
+          }
         }
-      } catch (const std::exception &exc) {
-        aggregate.skipped_parse_files += 1;
-        std::cerr << format_parse_failure(file_path, exc.what()) << '\n';
-      }
-
-      stats_tracker_mark_file_finished(&tracker, file_path);
+      });
     }
 
-    tracker.stop_requested.store(true, std::memory_order_relaxed);
-    progress_thread.join();
-    return aggregate;
+    for (std::thread &worker : workers) {
+      worker.join();
+    }
+
+    if (fatal_error != nullptr) {
+      std::rethrow_exception(fatal_error);
+    }
+
+    progress_display.finish();
+    for (const std::string &message : parse_failures) {
+      std::cerr << message << '\n';
+    }
+    return finalize_concurrent_aggregate(std::move(aggregate));
   } catch (...) {
-    tracker.stop_requested.store(true, std::memory_order_relaxed);
-    progress_thread.join();
+    progress_display.close();
     throw;
   }
 }
@@ -663,25 +824,26 @@ int main(int argc, char **argv) {
     }
 
     std::cout << "stats phase" << std::endl;
-    const AggregateStats stats = collect_prefix_stats(
-        existing_files, range.start_epoch, range.end_exclusive_epoch);
-
-    std::uint64_t prefix_scoped_as_total = 0;
-    for (const auto &entry : stats.prefix_to_ases) {
-      prefix_scoped_as_total += entry.second.size();
-    }
+    const StatsSummary stats = collect_prefix_stats(
+        existing_files,
+        range.start_epoch,
+        range.end_exclusive_epoch,
+        config.stats_workers,
+        config.stats_batch_size);
 
     std::cout << "start_date: " << config.start_date << '\n';
     std::cout << "end_date: " << config.end_date << '\n';
     std::cout << "collector: " << config.collector << '\n';
     std::cout << "data_dir: " << fs::absolute(data_dir).string() << '\n';
     std::cout << "download_workers: " << config.download_workers << '\n';
+    std::cout << "stats_workers: " << config.stats_workers << '\n';
+    std::cout << "stats_batch_size: " << config.stats_batch_size << '\n';
     std::cout << "files_used: " << existing_files.size() << '\n';
     std::cout << "scanned_update_elements: " << stats.scanned_update_count << '\n';
     std::cout << "usable_update_elements: " << stats.usable_update_count << '\n';
     std::cout << "skipped_parse_files: " << stats.skipped_parse_files << '\n';
-    std::cout << "unique_prefixes: " << stats.prefix_to_ases.size() << '\n';
-    std::cout << "prefix_scoped_as_total: " << prefix_scoped_as_total << '\n';
+    std::cout << "unique_prefixes: " << stats.unique_prefixes << '\n';
+    std::cout << "prefix_scoped_as_total: " << stats.prefix_scoped_as_total << '\n';
     return 0;
   } catch (const std::exception &exc) {
     std::cerr << exc.what() << '\n';
