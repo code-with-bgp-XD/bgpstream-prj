@@ -33,8 +33,8 @@ namespace fs = std::filesystem;
 
 namespace {
 
-constexpr const char *kStartDate = "2025-11-01";
-constexpr const char *kEndDate = "2025-12-01";
+constexpr const char *kStartDate = "2025-01-01";
+constexpr const char *kEndDate = "2026-01-01";
 constexpr const char *kProject = "routeviews";
 constexpr const char *kCollector = "route-views.sg";
 constexpr const char *kDataRoot = "bgpdata";
@@ -60,6 +60,11 @@ struct Config {
 struct ClosedDateRange {
   std::time_t start_epoch{};
   std::time_t end_exclusive_epoch{};
+};
+
+struct RangeProcessingStats {
+  std::size_t files_used = 0;
+  std::size_t chunk_count = 0;
 };
 
 struct CommandResult {
@@ -437,6 +442,42 @@ std::string format_utc_timestamp(std::time_t epoch) {
   return output.str();
 }
 
+std::time_t first_day_of_next_month(std::time_t epoch) {
+  std::tm tm{};
+  if (gmtime_r(&epoch, &tm) == nullptr) {
+    throw std::runtime_error("Failed to convert UTC timestamp");
+  }
+
+  tm.tm_mday = 1;
+  tm.tm_hour = 0;
+  tm.tm_min = 0;
+  tm.tm_sec = 0;
+  tm.tm_mon += 1;
+
+  const std::time_t next_epoch = timegm(&tm);
+  if (next_epoch == static_cast<std::time_t>(-1)) {
+    throw std::runtime_error("Failed to compute next month boundary");
+  }
+  return next_epoch;
+}
+
+std::vector<ClosedDateRange> split_range_by_month(const ClosedDateRange &range) {
+  std::vector<ClosedDateRange> chunks;
+  for (std::time_t chunk_start = range.start_epoch;
+       chunk_start < range.end_exclusive_epoch;) {
+    const std::time_t chunk_end =
+        std::min(first_day_of_next_month(chunk_start), range.end_exclusive_epoch);
+    chunks.push_back(ClosedDateRange{chunk_start, chunk_end});
+    chunk_start = chunk_end;
+  }
+  return chunks;
+}
+
+std::string format_range_label(const ClosedDateRange &range) {
+  return "[" + format_utc_timestamp(range.start_epoch) + ", " +
+         format_utc_timestamp(range.end_exclusive_epoch) + ")";
+}
+
 std::string detect_python_executable() {
   const fs::path venv_python = fs::path(".venv") / "bin" / "python";
   if (fs::exists(venv_python)) {
@@ -489,10 +530,6 @@ std::vector<fs::path> collect_target_files(const Config &config,
     if (!path_text.empty()) {
       files.emplace_back(path_text);
     }
-  }
-
-  if (files.empty()) {
-    throw std::runtime_error("No target files were discovered from download.py --dry-run");
   }
   return files;
 }
@@ -690,12 +727,54 @@ StatsSummary finalize_concurrent_aggregate(ConcurrentAggregate &&aggregate) {
   return summary;
 }
 
-StatsSummary collect_prefix_stats(const std::vector<fs::path> &files,
-                                  std::time_t start_epoch,
-                                  std::time_t end_exclusive_epoch,
-                                  int stats_workers,
-                                  int stats_batch_size) {
-  ConcurrentAggregate aggregate;
+StatsSummary snapshot_concurrent_aggregate(const ConcurrentAggregate &aggregate) {
+  StatsSummary summary;
+  summary.scanned_update_count =
+      aggregate.scanned_update_count.load(std::memory_order_relaxed);
+  summary.usable_update_count =
+      aggregate.usable_update_count.load(std::memory_order_relaxed);
+  summary.skipped_parse_files =
+      aggregate.skipped_parse_files.load(std::memory_order_relaxed);
+
+  for (const AggregateShard &shard : aggregate.shards) {
+    summary.unique_prefixes += shard.prefix_to_ases.size();
+    for (const auto &entry : shard.prefix_to_ases) {
+      summary.prefix_scoped_as_total += entry.second.size();
+    }
+  }
+
+  return summary;
+}
+
+void print_stats_summary(const Config &config,
+                         const fs::path &data_dir,
+                         const RangeProcessingStats &processing_stats,
+                         const StatsSummary &stats,
+                         std::string_view title) {
+  std::cout << title << '\n';
+  std::cout << "start_date: " << config.start_date << '\n';
+  std::cout << "end_date: " << config.end_date << '\n';
+  std::cout << "collector: " << config.collector << '\n';
+  std::cout << "data_dir: " << fs::absolute(data_dir).string() << '\n';
+  std::cout << "download_workers: " << config.download_workers << '\n';
+  std::cout << "stats_workers: " << config.stats_workers << '\n';
+  std::cout << "stats_batch_size: " << config.stats_batch_size << '\n';
+  std::cout << "monthly_chunks: " << processing_stats.chunk_count << '\n';
+  std::cout << "files_used: " << processing_stats.files_used << '\n';
+  std::cout << "scanned_update_elements: " << stats.scanned_update_count << '\n';
+  std::cout << "usable_update_elements: " << stats.usable_update_count << '\n';
+  std::cout << "skipped_parse_files: " << stats.skipped_parse_files << '\n';
+  std::cout << "unique_prefixes: " << stats.unique_prefixes << '\n';
+  std::cout << "prefix_scoped_as_total: " << stats.prefix_scoped_as_total << '\n';
+  std::cout << std::flush;
+}
+
+void collect_prefix_stats_into_aggregate(const std::vector<fs::path> &files,
+                                         std::time_t start_epoch,
+                                         std::time_t end_exclusive_epoch,
+                                         int stats_workers,
+                                         int stats_batch_size,
+                                         ConcurrentAggregate *aggregate) {
   StatsProgressDisplay progress_display(files.size(), total_file_bytes(files));
   const std::size_t worker_count = std::min<std::size_t>(files.size(), stats_workers);
 
@@ -732,14 +811,14 @@ StatsSummary collect_prefix_stats(const std::vector<fs::path> &files,
                   file_stats = collect_file_prefix_stats(
                       file_path, start_epoch, end_exclusive_epoch);
                 } catch (const std::exception &exc) {
-                  aggregate.skipped_parse_files.fetch_add(1, std::memory_order_relaxed);
+                  aggregate->skipped_parse_files.fetch_add(1, std::memory_order_relaxed);
                   std::lock_guard<std::mutex> lock(parse_failures_mutex);
                   parse_failures.push_back(format_parse_failure(file_path, exc.what()));
                 }
 
                 if (file_stats.has_value()) {
                   merge_file_stats_into_concurrent_aggregate(
-                      &aggregate, std::move(*file_stats));
+                      aggregate, std::move(*file_stats));
                 }
 
                 batch_completed_files += 1;
@@ -779,7 +858,7 @@ StatsSummary collect_prefix_stats(const std::vector<fs::path> &files,
     for (const std::string &message : parse_failures) {
       std::cerr << message << '\n';
     }
-    return finalize_concurrent_aggregate(std::move(aggregate));
+    return;
   } catch (...) {
     progress_display.close();
     throw;
@@ -798,6 +877,120 @@ std::vector<fs::path> filter_existing_files(const std::vector<fs::path> &files) 
   return existing;
 }
 
+void cleanup_chunk_files(const std::vector<fs::path> &target_files) {
+  for (const fs::path &file_path : target_files) {
+    std::error_code error;
+    fs::remove(file_path, error);
+    if (error) {
+      throw std::runtime_error("Failed to remove chunk file " +
+                               file_path.string() + ": " + error.message());
+    }
+
+    const fs::path partial_path = file_path.parent_path() /
+                                  (file_path.filename().string() + ".part");
+    error.clear();
+    fs::remove(partial_path, error);
+    if (error) {
+      throw std::runtime_error("Failed to remove chunk partial file " +
+                               partial_path.string() + ": " + error.message());
+    }
+  }
+}
+
+RangeProcessingStats process_range_in_monthly_chunks(const Config &config,
+                                                     const ClosedDateRange &range,
+                                                     ConcurrentAggregate *aggregate) {
+  const std::vector<ClosedDateRange> chunks = split_range_by_month(range);
+  const fs::path data_dir = config.output_dir / config.project / config.collector / "updates";
+
+  RangeProcessingStats processing_stats;
+
+  int remaining_limit = config.limit;
+  for (const ClosedDateRange &chunk : chunks) {
+    if (remaining_limit == 0) {
+      break;
+    }
+
+    processing_stats.chunk_count += 1;
+
+    Config chunk_config = config;
+    if (remaining_limit > 0) {
+      chunk_config.limit = remaining_limit;
+    }
+
+    const std::string chunk_label = format_range_label(chunk);
+    std::vector<fs::path> target_files;
+
+    try {
+      std::cout << "download phase " << chunk_label << std::endl;
+      target_files = collect_target_files(chunk_config, chunk);
+      if (target_files.empty()) {
+        std::cout << "skip empty chunk " << chunk_label << std::endl;
+        const std::string current_title =
+            "current cumulative stats after chunk " + chunk_label;
+        print_stats_summary(
+            config,
+            data_dir,
+            processing_stats,
+            snapshot_concurrent_aggregate(*aggregate),
+            current_title);
+        continue;
+      }
+
+      const int download_exit_code =
+          run_streaming_command(build_download_command(chunk_config, chunk, false));
+      if (download_exit_code != 0) {
+        throw std::runtime_error("download.py failed with exit code " +
+                                 std::to_string(download_exit_code));
+      }
+
+      const std::vector<fs::path> existing_files = filter_existing_files(target_files);
+      if (!existing_files.empty()) {
+        std::cout << "stats phase " << chunk_label << std::endl;
+        collect_prefix_stats_into_aggregate(
+            existing_files,
+            chunk.start_epoch,
+            chunk.end_exclusive_epoch,
+            config.stats_workers,
+            config.stats_batch_size,
+            aggregate);
+        processing_stats.files_used += existing_files.size();
+      } else {
+        std::cout << "skip stats phase " << chunk_label
+                  << " because no local files are available" << std::endl;
+      }
+
+      const std::string current_title =
+          "current cumulative stats after chunk " + chunk_label;
+      print_stats_summary(
+          config,
+          data_dir,
+          processing_stats,
+          snapshot_concurrent_aggregate(*aggregate),
+          current_title);
+    } catch (...) {
+      try {
+        cleanup_chunk_files(target_files);
+      } catch (const std::exception &cleanup_exc) {
+        std::cerr << cleanup_exc.what() << '\n';
+      }
+      throw;
+    }
+
+    std::cout << "cleanup phase " << chunk_label << std::endl;
+    cleanup_chunk_files(target_files);
+
+    if (remaining_limit > 0) {
+      remaining_limit -= static_cast<int>(target_files.size());
+      if (remaining_limit < 0) {
+        remaining_limit = 0;
+      }
+    }
+  }
+
+  return processing_stats;
+}
+
 }  // namespace
 
 int main(int argc, char **argv) {
@@ -805,45 +998,20 @@ int main(int argc, char **argv) {
     const Config config = parse_args(argc, argv);
     const ClosedDateRange range = parse_closed_date_range(config);
     const fs::path data_dir = config.output_dir / config.project / config.collector / "updates";
+    ConcurrentAggregate aggregate;
+    const RangeProcessingStats processing_stats =
+        process_range_in_monthly_chunks(config, range, &aggregate);
 
-    fs::create_directories(data_dir);
-
-    std::cout << "download phase" << std::endl;
-    const std::vector<fs::path> target_files = collect_target_files(config, range);
-
-    const int download_exit_code =
-        run_streaming_command(build_download_command(config, range, false));
-    if (download_exit_code != 0) {
-      throw std::runtime_error("download.py failed with exit code " +
-                               std::to_string(download_exit_code));
-    }
-
-    const std::vector<fs::path> existing_files = filter_existing_files(target_files);
-    if (existing_files.empty()) {
+    if (processing_stats.files_used == 0) {
       throw std::runtime_error("No local files available for statistics.");
     }
 
-    std::cout << "stats phase" << std::endl;
-    const StatsSummary stats = collect_prefix_stats(
-        existing_files,
-        range.start_epoch,
-        range.end_exclusive_epoch,
-        config.stats_workers,
-        config.stats_batch_size);
-
-    std::cout << "start_date: " << config.start_date << '\n';
-    std::cout << "end_date: " << config.end_date << '\n';
-    std::cout << "collector: " << config.collector << '\n';
-    std::cout << "data_dir: " << fs::absolute(data_dir).string() << '\n';
-    std::cout << "download_workers: " << config.download_workers << '\n';
-    std::cout << "stats_workers: " << config.stats_workers << '\n';
-    std::cout << "stats_batch_size: " << config.stats_batch_size << '\n';
-    std::cout << "files_used: " << existing_files.size() << '\n';
-    std::cout << "scanned_update_elements: " << stats.scanned_update_count << '\n';
-    std::cout << "usable_update_elements: " << stats.usable_update_count << '\n';
-    std::cout << "skipped_parse_files: " << stats.skipped_parse_files << '\n';
-    std::cout << "unique_prefixes: " << stats.unique_prefixes << '\n';
-    std::cout << "prefix_scoped_as_total: " << stats.prefix_scoped_as_total << '\n';
+    print_stats_summary(
+        config,
+        data_dir,
+        processing_stats,
+        finalize_concurrent_aggregate(std::move(aggregate)),
+        "final cumulative stats");
     return 0;
   } catch (const std::exception &exc) {
     std::cerr << exc.what() << '\n';
