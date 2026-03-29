@@ -5,15 +5,15 @@
 
 #include "bgpstream_runner/chunk_engine.h"
 #include "bgpstream_runner/common.h"
-#include "bgpstream_runner/prefix_as_stats_processor.h"
+#include "bgpstream_runner/plugin_loader.h"
 
 int main(int argc, char **argv) {
-    std::unique_ptr<bgpstream_runner::PrefixAsStatsProcessor> processor;
+    std::unique_ptr<bgpstream_runner::LoadedProcessorPlugin> processor_plugin;
     std::unique_ptr<bgpstream_runner::ChunkEngine> engine;
     try {
         const bgpstream_runner::Config config = bgpstream_runner::parse_args(argc, argv);
-        processor = std::make_unique<bgpstream_runner::PrefixAsStatsProcessor>();
-        engine = std::make_unique<bgpstream_runner::ChunkEngine>(config, *processor);
+        processor_plugin = std::make_unique<bgpstream_runner::LoadedProcessorPlugin>(config, argv[0]);
+        engine = std::make_unique<bgpstream_runner::ChunkEngine>(config, processor_plugin->processor());
 
         const bgpstream_runner::RangeProcessingStats stats = engine->run();
         if (stats.files_used == 0) {

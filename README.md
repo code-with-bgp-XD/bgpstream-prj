@@ -1,15 +1,15 @@
 # BGPStream Chunk Runner
 
-这个项目的目标是基于 CAIDA `bgpstream` 和底层 `python/download.py`，对一个较长时间范围内的 BGP update 数据做“分段下载、分段处理、分段清理”，从而避免一次性下载整段历史数据导致磁盘占用过大。
+这个项目的目标是基于 CAIDA `bgpstream` 和底层 `python/download.py`，对一个较长时间范围内的 BGP update 数据做“分段下载、分段处理、缓存复用”，从而避免一次性下载整段历史数据导致磁盘占用过大，同时减少重复实验时的重复下载成本。
 
 当前架构分成两层：
 
 1. Python 下载层
    固定使用 `python/download.py` 负责远端资源发现、断点续传、重试和文件落盘。
 
-2. C++ 处理中层 + 上层处理器
-   C++ 中层负责按配置切片、调用下载脚本、遍历 MRT 文件里的 BGP 报文、把报文批量传给上层处理器，并在每个分片完成后清理当前分片文件。
-   具体“怎么处理一批报文”由派生处理器决定。
+2. C++ 处理中层 + 处理器插件
+   C++ 中层负责按配置切片、调用下载脚本、遍历 MRT 文件里的 BGP 报文、把报文批量传给上层处理器。
+   具体“怎么处理一批报文”由 `MessageProcessor` 插件决定，主程序在运行时动态加载处理器库。
 
 ---
 
@@ -17,7 +17,7 @@
 
 整体流程如下：
 
-1. 如果根目录存在本地 `config.json`，程序会先读取它；仓库里提交的是 `config.example.json` 模板。随后再用命令行参数覆盖同名配置，最终构造 `Config`。
+1. 程序启动时会强制读取仓库根目录的 `config.json`；如果文件不存在，会直接报错退出。仓库里提交的是 `config.example.json` 模板。读取完配置后，再用命令行参数覆盖同名字段，最终构造 `Config`。
 2. 按 `chunk_size + chunk_unit` 把 `start_date ~ end_date` 切成多个 `ClosedDateRange`。
 3. 对每个分片：
    - 用 `python/download.py --dry-run` 发现该分片需要的 update 文件。
@@ -42,6 +42,8 @@
 ├── README.md
 ├── config.example.json
 ├── .clangd
+├── examples/                      # 仓库内置示例插件
+├── local/                         # 用户自定义处理器目录，默认不被 Git 追踪
 ├── python/
 │   ├── download.py
 └── cpp/
@@ -51,15 +53,16 @@
     │   ├── config_file.h
     │   ├── download_client.h
     │   ├── message_processor.h
-    │   ├── chunk_engine.h
-    │   └── prefix_as_stats_processor.h
+    │   ├── plugin_loader.h
+    │   ├── processor_plugin_api.h
+    │   └── chunk_engine.h
     └── src/
         ├── main.cpp
         ├── common.cpp
         ├── config_file.cpp
         ├── download_client.cpp
         ├── chunk_engine.cpp
-        └── prefix_as_stats_processor.cpp
+        └── plugin_loader.cpp
 ```
 
 ---
@@ -71,14 +74,16 @@
 - `CMakeLists.txt`
   项目构建入口。强制 out-of-source build，要求使用 `cmake -S . -B build`。
   同时开启 `CMAKE_EXPORT_COMPILE_COMMANDS=ON`，因此会在 `build/compile_commands.json` 生成 clangd 可用的编译数据库。
+  另外还提供了 `bgpstream_add_processor_plugin(...)`，供 `examples/` 里的示例插件和 `local/` 里的自定义插件复用。
 
 - `.clangd`
   告诉 clangd 去 `build/` 目录读取 `compile_commands.json`。
 
 - `config.example.json`
-  仓库内提交的配置模板。复制成本地 `config.json` 后即可作为实际运行配置文件。用于配置：
+  仓库内提交的配置模板。复制成根目录 `config.json` 后即可作为实际运行配置文件。程序启动时必须能读到这个文件。用于配置：
   - 起止日期
   - 分片大小
+  - 处理器插件路径
   - 下载线程数
   - 解析线程数
   - 批量处理大小
@@ -154,20 +159,24 @@
   - `print_summary(std::ostream&)`
     输出处理器自己的统计结果。
 
-### 当前的具体业务处理器
+- `cpp/include/bgpstream_runner/processor_plugin_api.h`
+  处理器插件导出接口。自定义处理器只要实现 `MessageProcessor`，并导出固定名字的工厂函数，就可以被主程序动态加载。
 
-- `cpp/include/bgpstream_runner/prefix_as_stats_processor.h`
-  `cpp/src/prefix_as_stats_processor.cpp`
-  这是现有业务逻辑的派生实现。它会：
-  - 只处理 `Announcement`
-  - 忽略 `Withdrawal`
-  - 对每个前缀维护一个 `set<ASN>`
-  - 统计：
-    - `usable_update_elements`
-    - `unique_prefixes`
-    - `prefix_scoped_as_total`
+- `cpp/include/bgpstream_runner/plugin_loader.h`
+  `cpp/src/plugin_loader.cpp`
+  负责在运行时通过动态库加载处理器插件。
+  构建阶段会生成 `build/bgpstream_processor_plugins.tsv` 清单，主程序据此解析当前可用插件。
 
-  注意：同一个 ASN 如果出现在不同前缀的 announcement 里，会被分别计入对应前缀。
+### 示例插件
+
+- `examples/CMakeLists.txt`
+  注册仓库内置的示例插件，便于直接测试插件架构和切换逻辑。
+
+- `examples/example_message_summary_plugin.cpp`
+- `examples/example_announcement_counter_plugin.cpp`
+- `examples/example_withdrawal_prefix_plugin.cpp`
+- `examples/example_origin_asn_plugin.cpp`
+  这些文件提供了几个体量很小的示例处理器，便于参考实现方式，也可以直接通过根目录 `config.json` 的 `processor_plugin` 字段切换使用。
 
 ### 主入口
 
@@ -175,7 +184,7 @@
   主程序入口。
   它负责：
   - 读取命令行参数
-  - 创建 `PrefixAsStatsProcessor`
+  - 动态加载处理器插件
   - 创建 `ChunkEngine`
   - 启动整条处理链
   - 输出最终统计
@@ -190,24 +199,22 @@
   `download.py` 不需要知道上层怎么统计，C++ 处理器也不需要知道底层怎么下载。
 
 - 中层稳定、上层可扩展
-  如果以后你要做别的统计，只需要再写一个新的 `MessageProcessor` 派生类，不需要改下载流程和分片控制逻辑。
+  如果以后你要做别的统计，只需要单独写一个新的 `MessageProcessor` 插件，不需要改下载流程、分片控制逻辑，也不需要改 `main.cpp`。
 
 - 批量处理减少虚函数开销
   中层不是“每条报文调用一次虚函数”，而是“积累一批 `BGPMessage` 后再调用一次处理器”，更适合大规模数据遍历。
 
-- 分片清理控制磁盘占用
-  每个分片处理完成后立刻删除该分片文件，因此总磁盘占用接近“单分片峰值”，不会随着总时间范围线性增长。
+- 缓存上限控制磁盘占用
+  已下载文件会保留复用；如果缓存超过配置的上限，程序会在下载前按“最旧文件优先”粗略淘汰旧文件。
 
 ---
 
-## 当前默认统计口径
+## 当前插件选择规则
 
-当前派生处理器的统计逻辑是：
-
-- 中层遍历所有 `announcement` 和 `withdrawal`
-- 上层 `PrefixAsStatsProcessor` 只对 `announcement` 生效
-- 如果 announcement 中没有前缀或没有 AS path，则不会进入 `usable_update_elements`
-- `prefix_scoped_as_total` 是“每个前缀下不同 AS 数量”的总和，不是全局唯一 AS 数量
+- 所有处理器插件都通过 `bgpstream_add_processor_plugin(...)` 注册到构建系统。
+- 构建完成后，主程序会读取 `build/bgpstream_processor_plugins.tsv` 来发现可用插件。
+- 当前仓库默认会注册多个 `examples/` 示例插件，因此通常需要在根目录 `config.json` 的 `processor_plugin` 字段里显式指定插件名。
+- 也可以用 `--processor-plugin NAME_OR_PATH` 临时覆盖根目录 `config.json` 里的同名字段。
 
 ---
 
@@ -223,6 +230,7 @@ cmake --build build
 构建后主要产物：
 
 - `build/bgpstream_prefix_stats`
+- `build/bgpstream_processor_plugins.tsv`
 - `build/compile_commands.json`
 
 运行过程中还会在仓库根目录下的 `log/` 目录生成文本记录文件：
@@ -240,7 +248,8 @@ cmake --build build
 - 已处理分片数
 - 已使用文件数
 - announcement / withdrawal / visited_messages 统计
-- 当前处理器的业务统计结果，例如 `unique_prefixes`、`prefix_scoped_as_total`
+- 当前处理器的业务统计结果
+  具体字段取决于你当前加载的本地插件实现。
 
 缓存目录默认是 `output_dir`。程序不会在每个分片结束后删除缓存文件；如果当前分片需要下载新文件，并且整个缓存目录已经明显超过 `max_cache_size_gb`，程序会在下载前按“最旧文件优先”做一次粗略清理。
 
@@ -257,7 +266,7 @@ cmake --build build
 
 ## 运行方式
 
-程序默认会尝试读取根目录下的本地 `config.json`。该文件已被 `.gitignore` 忽略，不会被 Git 追踪。仓库里保留一份`config.example.json`作为模板。如果命令行里传了同名参数，命令行参数优先。
+程序启动时会强制读取根目录下的 `config.json`。该文件已被 `.gitignore` 忽略，不会被 Git 追踪。仓库里保留一份 `config.example.json` 作为模板。如果命令行里传了同名参数，命令行参数优先。
 
 建议先从模板创建本地配置：
 
@@ -273,6 +282,7 @@ cp config.example.json config.json
   "end_date": "2026-01-01",
   "project": "routeviews",
   "collector": "route-views.sg",
+  "processor_plugin": "example_message_summary_plugin",
   "output_dir": "bgpdata",
   "download_workers": 32,
   "parser_workers": 8,
@@ -298,10 +308,9 @@ cp config.example.json config.json
   --message-batch-size 1024
 ```
 
-配置文件相关参数：
+配置相关命令行参数：
 
-- `--config PATH`
-- `--no-config`
+- `--processor-plugin NAME_OR_PATH`
 
 分片相关命令行参数：
 
@@ -315,6 +324,7 @@ cp config.example.json config.json
 - `end_date`
 - `project`
 - `collector`
+- `processor_plugin`
 - `output_dir`
 - `download_workers`
 - `parser_workers`
@@ -340,6 +350,12 @@ cp config.example.json config.json
 
 - `collector`
   传给 `python/download.py` 的 collector 名称，例如 `route-views.sg`。
+
+- `processor_plugin`
+  处理器插件选择器。可以填写插件名，也可以填写动态库路径。
+  如果当前构建里只注册了一个插件，这里可以留空，主程序会自动选择它。
+  推荐优先填写插件名，例如 `example_message_summary_plugin`，这样不依赖 `.so` 后缀和绝对路径。
+  当前仓库已经注册了多个 `examples/` 示例插件，所以实际使用时应当在根目录 `config.json` 里显式填写这个字段。
 
 - `output_dir`
   下载文件的本地根目录。实际 update 文件会落在类似 `output_dir/project/collector/updates/` 的路径下。
@@ -371,7 +387,7 @@ cp config.example.json config.json
   `-1` 表示不限制；正整数表示每次运行最多只处理前 `N` 个匹配文件，通常用于测试。
 
 - `log_phase_transitions`
-  是否输出 `download phase`、`process phase`、`cleanup phase` 这类阶段切换日志。
+  是否输出 `download phase`、`process phase`、`cache eviction` 这类阶段切换日志。
 
 - `log_chunk_summary`
   是否在每个分片处理完成后输出一次当前累计统计。
@@ -394,21 +410,101 @@ cp config.example.json config.json
 - `withdrawal_messages`
 - `skipped_parse_files`
 
-其中业务处理器 `PrefixAsStatsProcessor` 还会额外输出：
-
-- `usable_update_elements`
-- `unique_prefixes`
-- `prefix_scoped_as_total`
+除此之外，处理器插件还会追加输出自己的业务统计字段，具体由 `print_summary()` 实现决定。
 
 ---
 
-## 后续扩展建议
+## 本地自定义处理器
 
-如果后续要扩展新的统计任务，推荐直接新增一个新的处理器类：
+如果你想添加自己的 `BGPMessage` 处理器，当前推荐的方式是不改仓库里的主代码，而是在本地 `local/` 目录下新增一个插件。这个目录已经被 Git 忽略，专门留给用户自己的实验代码；仓库内置示例已经移到 `examples/`。
 
-1. 新建一个派生类，继承 `MessageProcessor`
-2. 在 `handle_messages()` 里实现自己的批量处理逻辑
-3. 在 `print_summary()` 里输出自己的统计结果
-4. 在 `cpp/src/main.cpp` 里切换成新的处理器实例
+最小流程如下：
 
-这样可以复用现有的分片下载、文件遍历和清理框架，而不需要重复写底层流程。
+1. 新建 `local/my_processor.cpp`
+2. 在里面继承 `MessageProcessor`
+3. 用 `BGPSTREAM_RUNNER_EXPORT_PROCESSOR(...)` 导出工厂函数
+4. 新建 `local/CMakeLists.txt`
+5. 在 `local/CMakeLists.txt` 里调用 `bgpstream_add_processor_plugin(...)`
+6. 重新执行 `cmake -S . -B build && cmake --build build`
+7. 如果当前只注册了这一个插件，可以直接运行主程序；如果注册了多个插件，就在根目录 `config.json` 里的 `processor_plugin` 字段指定其中一个
+
+一个最小示例：
+
+```cpp
+#include "bgpstream_runner/message_processor.h"
+#include "bgpstream_runner/processor_plugin_api.h"
+
+class MyProcessor : public bgpstream_runner::MessageProcessor {
+   public:
+    std::string_view name() const override { return "my_processor"; }
+
+    void handle_messages(const std::vector<bgpstream_runner::BGPMessage> &messages) override {
+        processed_ += messages.size();
+    }
+
+    void print_summary(std::ostream &out) const override {
+        out << "processed_messages: " << processed_ << '\n';
+    }
+
+   private:
+    std::uint64_t processed_ = 0;
+};
+
+BGPSTREAM_RUNNER_EXPORT_PROCESSOR(MyProcessor)
+```
+
+对应的 `local/CMakeLists.txt` 可以写成：
+
+```cmake
+bgpstream_add_processor_plugin(
+  my_processor_plugin
+  ${CMAKE_CURRENT_LIST_DIR}/my_processor.cpp
+)
+```
+
+构建后，直接把根目录 `config.json` 改成例如：
+
+```json
+{
+  "processor_plugin": "my_processor_plugin"
+}
+```
+
+然后运行：
+
+```bash
+./build/bgpstream_prefix_stats
+```
+
+仓库当前附带了一个本地示例插件：
+
+- `examples/example_message_summary_plugin.cpp`
+  统计处理过的报文数、带前缀的 announcement / withdrawal 数量，以及唯一前缀数。
+
+- `examples/example_announcement_counter_plugin.cpp`
+  只统计 announcement 报文数量。
+
+- `examples/example_withdrawal_prefix_plugin.cpp`
+  统计带前缀的 withdrawal 报文数量，以及唯一 withdrawn prefix 数量。
+
+- `examples/example_origin_asn_plugin.cpp`
+  统计 announcement 中出现过的 origin ASN 数量。
+
+这些示例插件对应的 `processor_plugin` 取值分别是：
+
+- `example_message_summary_plugin`
+- `example_announcement_counter_plugin`
+- `example_withdrawal_prefix_plugin`
+- `example_origin_asn_plugin`
+
+也就是说，根目录 `config.json` 里推荐直接这样写：
+
+```json
+{
+  "processor_plugin": "example_origin_asn_plugin"
+}
+```
+
+把这个字段改成不同插件名，就可以在不改 `main.cpp`、不增加额外配置文件的情况下切换处理逻辑。
+
+这样用户自己的自定义处理器源码、构建规则和实验逻辑都可以留在 `local/` 下，不会被 Git 追踪；仓库里稳定不变的中层框架、下载逻辑和 `main.cpp` 入口都不需要改动。`examples/` 则专门用来放受版本控制的示例插件。

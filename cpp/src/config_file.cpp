@@ -286,6 +286,8 @@ class JsonConfigParser {
             config_->project = require_string(key, value);
         } else if (key == "collector") {
             config_->collector = require_string(key, value);
+        } else if (key == "processor_plugin") {
+            config_->processor_plugin = require_string(key, value);
         } else if (key == "output_dir") {
             config_->output_dir = require_string(key, value);
         } else if (key == "download_workers") {

@@ -3,6 +3,7 @@
   "end_date": "2026-01-01",
   "project": "routeviews",
   "collector": "route-views.sg",
+  "processor_plugin": "example_message_summary_plugin",
   "output_dir": "bgpdata",
   "download_workers": 32,
   "parser_workers": 8,

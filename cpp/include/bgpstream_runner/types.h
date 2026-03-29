@@ -14,6 +14,7 @@ inline constexpr char kDefaultProject[] = "routeviews";
 inline constexpr char kDefaultCollector[] = "route-views.sg";
 inline constexpr char kDefaultDataRoot[] = "bgpdata";
 inline constexpr char kDefaultConfigPath[] = "config.json";
+inline constexpr char kDefaultProcessorPlugin[] = "";
 inline constexpr int kDefaultDownloadWorkers = 32;
 inline constexpr int kDefaultParserWorkers = 8;
 inline constexpr int kDefaultMessageBatchSize = 4096;
@@ -30,6 +31,7 @@ struct Config {
     std::string end_date = kDefaultEndDate;
     std::string project = kDefaultProject;
     std::string collector = kDefaultCollector;
+    std::string processor_plugin = kDefaultProcessorPlugin;
     std::filesystem::path output_dir = kDefaultDataRoot;
     int download_workers = kDefaultDownloadWorkers;
     int parser_workers = kDefaultParserWorkers;

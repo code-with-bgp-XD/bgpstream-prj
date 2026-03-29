@@ -19,6 +19,10 @@ namespace bgpstream_runner {
 
 namespace {
 
+#ifndef BGPSTREAM_SOURCE_DIR
+#define BGPSTREAM_SOURCE_DIR "."
+#endif
+
 std::time_t parse_utc_date(const std::string &date_text) {
     std::tm tm{};
     std::istringstream input(date_text);
@@ -62,30 +66,8 @@ std::time_t add_days(std::time_t epoch, int day_step) {
     return epoch + static_cast<std::time_t>(day_step) * kSecondsPerDay;
 }
 
-struct ConfigFileSelection {
-    std::filesystem::path path = kDefaultConfigPath;
-    bool enabled = true;
-    bool explicit_path = false;
-};
-
-ConfigFileSelection discover_config_file(int argc, char **argv) {
-    ConfigFileSelection selection;
-
-    for (int index = 1; index < argc; ++index) {
-        const std::string arg = argv[index];
-        if (arg == "--config") {
-            if (index + 1 >= argc) {
-                throw std::runtime_error("Missing value for --config");
-            }
-            selection.path = argv[++index];
-            selection.enabled = true;
-            selection.explicit_path = true;
-        } else if (arg == "--no-config") {
-            selection.enabled = false;
-        }
-    }
-
-    return selection;
+std::filesystem::path repo_config_path() {
+    return std::filesystem::path(BGPSTREAM_SOURCE_DIR) / kDefaultConfigPath;
 }
 
 int decode_exit_code(int status) {
@@ -208,9 +190,8 @@ void FileProgressDisplay::close_locked() {
            << "  --end-date YYYY-MM-DD\n"
            << "  --project NAME\n"
            << "  --collector NAME\n"
+           << "  --processor-plugin NAME_OR_PATH\n"
            << "  --output-dir PATH\n"
-           << "  --config PATH\n"
-           << "  --no-config\n"
            << "  --download-workers N\n"
            << "  --parser-workers N\n"
            << "  --message-batch-size N\n"
@@ -227,16 +208,11 @@ void FileProgressDisplay::close_locked() {
 
 Config parse_args(int argc, char **argv) {
     Config config;
-    const ConfigFileSelection config_file = discover_config_file(argc, argv);
-
-    if (config_file.enabled) {
-        const bool config_exists = std::filesystem::exists(config_file.path);
-        if (config_exists) {
-            apply_json_config_file(config_file.path, &config);
-        } else if (config_file.explicit_path) {
-            throw std::runtime_error("Config file does not exist: " + config_file.path.string());
-        }
+    const std::filesystem::path config_file = repo_config_path();
+    if (!std::filesystem::exists(config_file)) {
+        throw std::runtime_error("Required config file does not exist: " + config_file.string());
     }
+    apply_json_config_file(config_file, &config);
 
     for (int index = 1; index < argc; ++index) {
         const std::string arg = argv[index];
@@ -255,12 +231,10 @@ Config parse_args(int argc, char **argv) {
             config.project = require_value("--project");
         } else if (arg == "--collector") {
             config.collector = require_value("--collector");
+        } else if (arg == "--processor-plugin") {
+            config.processor_plugin = require_value("--processor-plugin");
         } else if (arg == "--output-dir") {
             config.output_dir = require_value("--output-dir");
-        } else if (arg == "--config") {
-            require_value("--config");
-        } else if (arg == "--no-config") {
-            continue;
         } else if (arg == "--download-workers") {
             config.download_workers = std::stoi(require_value("--download-workers"));
         } else if (arg == "--parser-workers") {
