@@ -18,17 +18,18 @@ struct CommandResult {
 };
 
 class FileProgressDisplay {
- public:
+public:
   FileProgressDisplay(std::size_t total_files, std::uint64_t total_bytes);
   FileProgressDisplay(const FileProgressDisplay &) = delete;
   FileProgressDisplay &operator=(const FileProgressDisplay &) = delete;
   ~FileProgressDisplay();
 
-  void mark_batch_completed(std::size_t completed_files, std::uint64_t completed_bytes);
+  void mark_batch_completed(std::size_t completed_files,
+                            std::uint64_t completed_bytes);
   void finish();
   void close();
 
- private:
+private:
   std::string build_line_locked() const;
   void render_locked();
   void close_locked();
@@ -58,11 +59,10 @@ CommandResult run_capture_command(const std::string &command);
 int run_streaming_command(const std::string &command);
 ClosedDateRange parse_closed_date_range(const Config &config);
 std::string format_utc_timestamp(std::time_t epoch);
-std::vector<ClosedDateRange> split_range_by_chunks(
-    const ClosedDateRange &range,
-    int chunk_size,
-    ChunkUnit chunk_unit);
+std::vector<ClosedDateRange> split_range_by_chunks(const ClosedDateRange &range,
+                                                   int chunk_size,
+                                                   ChunkUnit chunk_unit);
 std::string_view chunk_unit_to_string(ChunkUnit chunk_unit);
 std::string format_range_label(const ClosedDateRange &range);
 
-}  // namespace bgpstream_runner
+} // namespace bgpstream_runner

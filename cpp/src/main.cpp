@@ -14,7 +14,8 @@ int main(int argc, char **argv) {
     const bgpstream_runner::Config config =
         bgpstream_runner::parse_args(argc, argv);
     processor = std::make_unique<bgpstream_runner::PrefixAsStatsProcessor>();
-    engine = std::make_unique<bgpstream_runner::ChunkEngine>(config, *processor);
+    engine =
+        std::make_unique<bgpstream_runner::ChunkEngine>(config, *processor);
 
     const bgpstream_runner::RangeProcessingStats stats = engine->run();
     if (stats.files_used == 0) {
@@ -30,8 +31,7 @@ int main(int argc, char **argv) {
     if (engine != nullptr) {
       try {
         engine->write_record_file(engine->current_stats(),
-                                  "aborted cumulative stats",
-                                  "failed",
+                                  "aborted cumulative stats", "failed",
                                   exc.what());
       } catch (const std::exception &record_exc) {
         std::cerr << record_exc.what() << '\n';

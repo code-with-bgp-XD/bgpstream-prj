@@ -19,18 +19,19 @@ namespace {
 #define BGPSTREAM_SOURCE_DIR "."
 #endif
 
-}  // namespace
+} // namespace
 
 DownloadClient::DownloadClient(Config config) : config_(std::move(config)) {}
 
-std::vector<std::filesystem::path> DownloadClient::collect_target_files(
-    const ClosedDateRange &range,
-    int limit_override) const {
+std::vector<std::filesystem::path>
+DownloadClient::collect_target_files(const ClosedDateRange &range,
+                                     int limit_override) const {
   const CommandResult result =
       run_capture_command(build_download_command(range, true, limit_override));
   if (result.exit_code != 0) {
     throw std::runtime_error("download.py --dry-run failed with exit code " +
-                             std::to_string(result.exit_code) + "\n" + result.output);
+                             std::to_string(result.exit_code) + "\n" +
+                             result.output);
   }
 
   std::vector<std::filesystem::path> files;
@@ -49,7 +50,8 @@ std::vector<std::filesystem::path> DownloadClient::collect_target_files(
   return files;
 }
 
-void DownloadClient::download_range(const ClosedDateRange &range, int limit_override) const {
+void DownloadClient::download_range(const ClosedDateRange &range,
+                                    int limit_override) const {
   const int exit_code = run_streaming_command(
       build_download_command(range, false, limit_override));
   if (exit_code != 0) {
@@ -58,21 +60,20 @@ void DownloadClient::download_range(const ClosedDateRange &range, int limit_over
   }
 }
 
-std::string DownloadClient::build_download_command(
-    const ClosedDateRange &range,
-    bool dry_run,
-    int limit_override) const {
+std::string DownloadClient::build_download_command(const ClosedDateRange &range,
+                                                   bool dry_run,
+                                                   int limit_override) const {
   std::ostringstream command;
   command << shell_escape(python_executable()) << " "
-          << shell_escape(download_script_path())
-          << " --from-time " << shell_escape(format_utc_timestamp(range.start_epoch))
-          << " --until-time " << shell_escape(format_utc_timestamp(range.end_exclusive_epoch))
-          << " --collector " << shell_escape(config_.collector)
-          << " --project " << shell_escape(config_.project)
-          << " --record-type updates"
+          << shell_escape(download_script_path()) << " --from-time "
+          << shell_escape(format_utc_timestamp(range.start_epoch))
+          << " --until-time "
+          << shell_escape(format_utc_timestamp(range.end_exclusive_epoch))
+          << " --collector " << shell_escape(config_.collector) << " --project "
+          << shell_escape(config_.project) << " --record-type updates"
           << " --source auto"
-          << " --workers " << config_.download_workers
-          << " --output-dir " << shell_escape(config_.output_dir.string());
+          << " --workers " << config_.download_workers << " --output-dir "
+          << shell_escape(config_.output_dir.string());
 
   const int limit = resolve_limit(limit_override);
   if (limit > 0) {
@@ -109,7 +110,8 @@ std::string DownloadClient::download_script_path() const {
     return source_relative.string();
   }
 
-  const std::filesystem::path cwd_relative = std::filesystem::path("python") / "download.py";
+  const std::filesystem::path cwd_relative =
+      std::filesystem::path("python") / "download.py";
   if (std::filesystem::exists(cwd_relative)) {
     return cwd_relative.string();
   }
@@ -125,7 +127,8 @@ std::string DownloadClient::python_executable() const {
   }
 
   if (const char *virtual_env = std::getenv("VIRTUAL_ENV")) {
-    const auto candidate = std::filesystem::path(virtual_env) / "bin" / "python";
+    const auto candidate =
+        std::filesystem::path(virtual_env) / "bin" / "python";
     if (std::filesystem::exists(candidate)) {
       return candidate.string();
     }
@@ -140,4 +143,4 @@ std::string DownloadClient::python_executable() const {
   return "python3";
 }
 
-}  // namespace bgpstream_runner
+} // namespace bgpstream_runner

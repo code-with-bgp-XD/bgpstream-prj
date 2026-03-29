@@ -7,7 +7,8 @@ std::string_view PrefixAsStatsProcessor::name() const {
 }
 
 // 这个函数同一时间只会有一个线程在调用.
-void PrefixAsStatsProcessor::handle_messages(const std::vector<BGPMessage> &messages) {
+void PrefixAsStatsProcessor::handle_messages(
+    const std::vector<BGPMessage> &messages) {
   for (const auto &message : messages) {
     if (message.type != BGPMessageType::Announcement) {
       continue;
@@ -36,4 +37,4 @@ std::uint64_t PrefixAsStatsProcessor::prefix_scoped_as_total() const {
   return total;
 }
 
-}  // namespace bgpstream_runner
+} // namespace bgpstream_runner

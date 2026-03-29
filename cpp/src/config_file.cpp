@@ -26,7 +26,7 @@ struct JsonScalar {
 };
 
 class JsonConfigParser {
- public:
+public:
   JsonConfigParser(std::string text, std::filesystem::path path, Config *config)
       : text_(std::move(text)), path_(std::move(path)), config_(config) {}
 
@@ -68,11 +68,11 @@ class JsonConfigParser {
     ensure_eof();
   }
 
- private:
+private:
   [[noreturn]] void error(std::string_view message) const {
-    throw std::runtime_error(
-        "Invalid config JSON in " + path_.string() + " at byte " +
-        std::to_string(position_) + ": " + std::string(message));
+    throw std::runtime_error("Invalid config JSON in " + path_.string() +
+                             " at byte " + std::to_string(position_) + ": " +
+                             std::string(message));
   }
 
   void ensure_eof() const {
@@ -129,28 +129,28 @@ class JsonConfigParser {
       if (ch == '\\') {
         const char escaped = consume();
         switch (escaped) {
-          case '"':
-          case '\\':
-          case '/':
-            value.push_back(escaped);
-            break;
-          case 'b':
-            value.push_back('\b');
-            break;
-          case 'f':
-            value.push_back('\f');
-            break;
-          case 'n':
-            value.push_back('\n');
-            break;
-          case 'r':
-            value.push_back('\r');
-            break;
-          case 't':
-            value.push_back('\t');
-            break;
-          default:
-            error("Unsupported string escape");
+        case '"':
+        case '\\':
+        case '/':
+          value.push_back(escaped);
+          break;
+        case 'b':
+          value.push_back('\b');
+          break;
+        case 'f':
+          value.push_back('\f');
+          break;
+        case 'n':
+          value.push_back('\n');
+          break;
+        case 'r':
+          value.push_back('\r');
+          break;
+        case 't':
+          value.push_back('\t');
+          break;
+        default:
+          error("Unsupported string escape");
         }
         continue;
       }
@@ -226,14 +226,16 @@ class JsonConfigParser {
     return value.bool_value;
   }
 
-  std::string require_string(const std::string &key, const JsonScalar &value) const {
+  std::string require_string(const std::string &key,
+                             const JsonScalar &value) const {
     if (value.kind != JsonScalarKind::String) {
       throw std::runtime_error("Config key '" + key + "' must be a string");
     }
     return value.string_value;
   }
 
-  ChunkUnit require_chunk_unit(const std::string &key, const JsonScalar &value) const {
+  ChunkUnit require_chunk_unit(const std::string &key,
+                               const JsonScalar &value) const {
     const std::string text = require_string(key, value);
     if (text == "day" || text == "days") {
       return ChunkUnit::Day;
@@ -241,7 +243,8 @@ class JsonConfigParser {
     if (text == "month" || text == "months") {
       return ChunkUnit::Month;
     }
-    throw std::runtime_error("Config key '" + key + "' must be 'day' or 'month'");
+    throw std::runtime_error("Config key '" + key +
+                             "' must be 'day' or 'month'");
   }
 
   void apply_value(const std::string &key, const JsonScalar &value) {
@@ -278,7 +281,8 @@ class JsonConfigParser {
     } else if (key == "log_final_summary") {
       config_->log_final_summary = require_bool(key, value);
     } else {
-      throw std::runtime_error("Unknown config key '" + key + "' in " + path_.string());
+      throw std::runtime_error("Unknown config key '" + key + "' in " +
+                               path_.string());
     }
   }
 
@@ -288,7 +292,7 @@ class JsonConfigParser {
   std::size_t position_ = 0;
 };
 
-}  // namespace
+} // namespace
 
 void apply_json_config_file(const std::filesystem::path &path, Config *config) {
   std::ifstream input(path);
@@ -302,4 +306,4 @@ void apply_json_config_file(const std::filesystem::path &path, Config *config) {
   parser.parse();
 }
 
-}  // namespace bgpstream_runner
+} // namespace bgpstream_runner

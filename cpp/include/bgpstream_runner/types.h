@@ -67,4 +67,4 @@ struct BGPMessage {
   std::vector<std::uint32_t> asns;
 };
 
-}  // namespace bgpstream_runner
+} // namespace bgpstream_runner

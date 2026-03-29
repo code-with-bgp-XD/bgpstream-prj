@@ -6,8 +6,6 @@
 
 namespace bgpstream_runner {
 
-void apply_json_config_file(
-    const std::filesystem::path &path,
-    Config *config);
+void apply_json_config_file(const std::filesystem::path &path, Config *config);
 
-}  // namespace bgpstream_runner
+} // namespace bgpstream_runner

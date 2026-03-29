@@ -32,7 +32,8 @@ std::time_t parse_utc_date(const std::string &date_text) {
 
   const std::time_t epoch = timegm(&tm);
   if (epoch == static_cast<std::time_t>(-1)) {
-    throw std::runtime_error("Failed to convert UTC date to epoch: " + date_text);
+    throw std::runtime_error("Failed to convert UTC date to epoch: " +
+                             date_text);
   }
   return epoch;
 }
@@ -100,11 +101,11 @@ int decode_exit_code(int status) {
   return status;
 }
 
-}  // namespace
+} // namespace
 
-FileProgressDisplay::FileProgressDisplay(std::size_t total_files, std::uint64_t total_bytes)
-    : total_files_(total_files),
-      total_bytes_(total_bytes),
+FileProgressDisplay::FileProgressDisplay(std::size_t total_files,
+                                         std::uint64_t total_bytes)
+    : total_files_(total_files), total_bytes_(total_bytes),
       started_at_(std::chrono::steady_clock::now()) {
   const char *term = std::getenv("TERM");
   use_curses_ = (::isatty(STDOUT_FILENO) == 1 && term != nullptr &&
@@ -122,13 +123,10 @@ FileProgressDisplay::FileProgressDisplay(std::size_t total_files, std::uint64_t 
   }
 }
 
-FileProgressDisplay::~FileProgressDisplay() {
-  close();
-}
+FileProgressDisplay::~FileProgressDisplay() { close(); }
 
-void FileProgressDisplay::mark_batch_completed(
-    std::size_t completed_files,
-    std::uint64_t completed_bytes) {
+void FileProgressDisplay::mark_batch_completed(std::size_t completed_files,
+                                               std::uint64_t completed_bytes) {
   std::lock_guard<std::mutex> lock(mutex_);
   completed_files_ += completed_files;
   completed_bytes_ += completed_bytes;
@@ -148,7 +146,8 @@ void FileProgressDisplay::close() {
 std::string FileProgressDisplay::build_line_locked() const {
   static constexpr std::size_t kBarWidth = 36;
   const double fraction =
-      total_files_ == 0 ? 1.0 : static_cast<double>(completed_files_) / total_files_;
+      total_files_ == 0 ? 1.0
+                        : static_cast<double>(completed_files_) / total_files_;
   const std::size_t filled =
       static_cast<std::size_t>(fraction * static_cast<double>(kBarWidth));
   const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
@@ -165,8 +164,8 @@ std::string FileProgressDisplay::build_line_locked() const {
       output << ' ';
     }
   }
-  output << "] " << std::fixed << std::setprecision(1) << (fraction * 100.0) << "% "
-         << completed_files_ << "/" << total_files_ << " files "
+  output << "] " << std::fixed << std::setprecision(1) << (fraction * 100.0)
+         << "% " << completed_files_ << "/" << total_files_ << " files "
          << format_bytes(completed_bytes_) << "/" << format_bytes(total_bytes_)
          << " elapsed=" << format_elapsed(elapsed);
   return output.str();
@@ -179,15 +178,17 @@ void FileProgressDisplay::render_locked() {
   if (use_curses_ && !closed_) {
     erase();
     attron(A_BOLD);
-    mvaddnstr(0, 0, line.c_str(), COLS > 0 ? COLS - 1 : static_cast<int>(line.size()));
+    mvaddnstr(0, 0, line.c_str(),
+              COLS > 0 ? COLS - 1 : static_cast<int>(line.size()));
     attroff(A_BOLD);
     clrtoeol();
     refresh();
     return;
   }
 
-  const std::size_t padding =
-      last_rendered_width_ > line.size() ? last_rendered_width_ - line.size() : 0;
+  const std::size_t padding = last_rendered_width_ > line.size()
+                                  ? last_rendered_width_ - line.size()
+                                  : 0;
   std::cout << '\r' << line;
   if (padding > 0) {
     std::cout << std::string(padding, ' ');
@@ -213,25 +214,24 @@ void FileProgressDisplay::close_locked() {
 
 [[noreturn]] void print_usage_and_exit(const char *program, int exit_code) {
   std::ostream &stream = exit_code == 0 ? std::cout : std::cerr;
-  stream
-      << "Usage: " << program << " [options]\n"
-      << "  --start-date YYYY-MM-DD\n"
-      << "  --end-date YYYY-MM-DD\n"
-      << "  --project NAME\n"
-      << "  --collector NAME\n"
-      << "  --output-dir PATH\n"
-      << "  --config PATH\n"
-      << "  --no-config\n"
-      << "  --download-workers N\n"
-      << "  --parser-workers N\n"
-      << "  --message-batch-size N\n"
-      << "  --chunk-size N\n"
-      << "  --chunk-unit day|month\n"
-      << "  --log-phase-transitions true|false\n"
-      << "  --log-chunk-summary true|false\n"
-      << "  --log-final-summary true|false\n"
-      << "  --limit N\n"
-      << "  --help\n";
+  stream << "Usage: " << program << " [options]\n"
+         << "  --start-date YYYY-MM-DD\n"
+         << "  --end-date YYYY-MM-DD\n"
+         << "  --project NAME\n"
+         << "  --collector NAME\n"
+         << "  --output-dir PATH\n"
+         << "  --config PATH\n"
+         << "  --no-config\n"
+         << "  --download-workers N\n"
+         << "  --parser-workers N\n"
+         << "  --message-batch-size N\n"
+         << "  --chunk-size N\n"
+         << "  --chunk-unit day|month\n"
+         << "  --log-phase-transitions true|false\n"
+         << "  --log-chunk-summary true|false\n"
+         << "  --log-final-summary true|false\n"
+         << "  --limit N\n"
+         << "  --help\n";
   std::exit(exit_code);
 }
 
@@ -277,7 +277,8 @@ Config parse_args(int argc, char **argv) {
     } else if (arg == "--parser-workers") {
       config.parser_workers = std::stoi(require_value("--parser-workers"));
     } else if (arg == "--message-batch-size") {
-      config.message_batch_size = std::stoi(require_value("--message-batch-size"));
+      config.message_batch_size =
+          std::stoi(require_value("--message-batch-size"));
     } else if (arg == "--chunk-size") {
       config.chunk_size = std::stoi(require_value("--chunk-size"));
     } else if (arg == "--chunk-unit") {
@@ -296,7 +297,8 @@ Config parse_args(int argc, char **argv) {
       } else if (value == "false") {
         config.log_phase_transitions = false;
       } else {
-        throw std::runtime_error("--log-phase-transitions must be true or false");
+        throw std::runtime_error(
+            "--log-phase-transitions must be true or false");
       }
     } else if (arg == "--log-chunk-summary") {
       const std::string value = require_value("--log-chunk-summary");
@@ -363,7 +365,8 @@ std::string format_bytes(std::uint64_t num_bytes) {
   }
 
   std::ostringstream output;
-  output << std::fixed << std::setprecision(1) << value << ' ' << kUnits[unit_index];
+  output << std::fixed << std::setprecision(1) << value << ' '
+         << kUnits[unit_index];
   return output.str();
 }
 
@@ -374,9 +377,8 @@ std::string format_elapsed(std::chrono::seconds elapsed) {
   const auto seconds = total_seconds % 60;
 
   std::ostringstream output;
-  output << std::setfill('0') << std::setw(2) << hours << ':'
-         << std::setw(2) << minutes << ':'
-         << std::setw(2) << seconds;
+  output << std::setfill('0') << std::setw(2) << hours << ':' << std::setw(2)
+         << minutes << ':' << std::setw(2) << seconds;
   return output.str();
 }
 
@@ -389,7 +391,8 @@ std::uint64_t safe_file_size(const std::filesystem::path &file_path) {
   return size;
 }
 
-std::uint64_t total_file_bytes(const std::vector<std::filesystem::path> &files) {
+std::uint64_t
+total_file_bytes(const std::vector<std::filesystem::path> &files) {
   std::uint64_t total_bytes = 0;
   for (const auto &file_path : files) {
     total_bytes += safe_file_size(file_path);
@@ -437,7 +440,8 @@ ClosedDateRange parse_closed_date_range(const Config &config) {
   const std::time_t start = parse_utc_date(config.start_date);
   const std::time_t end_inclusive = parse_utc_date(config.end_date);
   if (end_inclusive < start) {
-    throw std::runtime_error("END_DATE must be greater than or equal to START_DATE");
+    throw std::runtime_error(
+        "END_DATE must be greater than or equal to START_DATE");
   }
 
   ClosedDateRange range;
@@ -457,21 +461,20 @@ std::string format_utc_timestamp(std::time_t epoch) {
   return output.str();
 }
 
-std::vector<ClosedDateRange> split_range_by_chunks(
-    const ClosedDateRange &range,
-    int chunk_size,
-    ChunkUnit chunk_unit) {
+std::vector<ClosedDateRange> split_range_by_chunks(const ClosedDateRange &range,
+                                                   int chunk_size,
+                                                   ChunkUnit chunk_unit) {
   std::vector<ClosedDateRange> chunks;
   for (std::time_t chunk_start = range.start_epoch;
        chunk_start < range.end_exclusive_epoch;) {
     std::time_t next_boundary = 0;
     switch (chunk_unit) {
-      case ChunkUnit::Day:
-        next_boundary = add_days(chunk_start, chunk_size);
-        break;
-      case ChunkUnit::Month:
-        next_boundary = first_day_of_next_month(chunk_start, chunk_size);
-        break;
+    case ChunkUnit::Day:
+      next_boundary = add_days(chunk_start, chunk_size);
+      break;
+    case ChunkUnit::Month:
+      next_boundary = first_day_of_next_month(chunk_start, chunk_size);
+      break;
     }
 
     const std::time_t chunk_end =
@@ -484,10 +487,10 @@ std::vector<ClosedDateRange> split_range_by_chunks(
 
 std::string_view chunk_unit_to_string(ChunkUnit chunk_unit) {
   switch (chunk_unit) {
-    case ChunkUnit::Day:
-      return "day";
-    case ChunkUnit::Month:
-      return "month";
+  case ChunkUnit::Day:
+    return "day";
+  case ChunkUnit::Month:
+    return "month";
   }
   return "unknown";
 }
@@ -497,4 +500,4 @@ std::string format_range_label(const ClosedDateRange &range) {
          format_utc_timestamp(range.end_exclusive_epoch) + ")";
 }
 
-}  // namespace bgpstream_runner
+} // namespace bgpstream_runner

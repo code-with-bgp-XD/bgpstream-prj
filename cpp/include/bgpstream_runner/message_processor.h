@@ -9,7 +9,7 @@
 namespace bgpstream_runner {
 
 class MessageProcessor {
- public:
+public:
   virtual ~MessageProcessor() = default;
 
   virtual std::string_view name() const = 0;
@@ -17,4 +17,4 @@ class MessageProcessor {
   virtual void print_summary(std::ostream &out) const = 0;
 };
 
-}  // namespace bgpstream_runner
+} // namespace bgpstream_runner
