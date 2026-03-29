@@ -2,7 +2,9 @@
 
 #include <cstdlib>
 #include <filesystem>
+#include <limits>
 #include <sstream>
+#include <string>
 #include <stdexcept>
 
 #include "bgpstream_runner/common.h"
@@ -19,32 +21,61 @@ namespace {
 #define BGPSTREAM_SOURCE_DIR "."
 #endif
 
+std::uint64_t parse_expected_size_bytes(const std::string &text) {
+    std::size_t parsed_length = 0;
+    const unsigned long long parsed_value = std::stoull(text, &parsed_length);
+    if (parsed_length != text.size()) {
+        throw std::runtime_error("Invalid expected size in download manifest: " + text);
+    }
+    if (parsed_value > std::numeric_limits<std::uint64_t>::max()) {
+        throw std::runtime_error("Expected size is too large in download manifest: " + text);
+    }
+    return static_cast<std::uint64_t>(parsed_value);
+}
+
+std::vector<DownloadTarget> parse_targets_from_manifest_output(const std::string &output) {
+    std::vector<DownloadTarget> targets;
+    std::istringstream lines(output);
+    std::string line;
+    while (std::getline(lines, line)) {
+        if (line.rfind("FILE\t", 0) != 0) {
+            continue;
+        }
+
+        const std::size_t first_tab = line.find('\t');
+        const std::size_t second_tab = line.find('\t', first_tab + 1);
+        const std::size_t third_tab = line.find('\t', second_tab + 1);
+        if (first_tab == std::string::npos || second_tab == std::string::npos || third_tab == std::string::npos) {
+            throw std::runtime_error("Invalid dry-run manifest line from download.py: " + line);
+        }
+
+        const std::string destination_text = trim(line.substr(first_tab + 1, second_tab - first_tab - 1));
+        const std::string local_path_text = trim(line.substr(second_tab + 1, third_tab - second_tab - 1));
+        const std::string expected_size_text = trim(line.substr(third_tab + 1));
+        if (destination_text.empty() || local_path_text.empty() || expected_size_text.empty()) {
+            throw std::runtime_error("Incomplete dry-run manifest line from download.py: " + line);
+        }
+
+        targets.push_back(DownloadTarget{
+            std::filesystem::path(destination_text),
+            std::filesystem::path(local_path_text),
+            parse_expected_size_bytes(expected_size_text),
+        });
+    }
+    return targets;
+}
+
 }  // namespace
 
 DownloadClient::DownloadClient(Config config) : config_(std::move(config)) {}
 
-std::vector<std::filesystem::path> DownloadClient::collect_target_files(const ClosedDateRange &range,
-                                                                        int limit_override) const {
-    const CommandResult result = run_capture_command(build_download_command(range, true, limit_override));
+std::vector<DownloadTarget> DownloadClient::collect_targets(const ClosedDateRange &range, int limit_override) const {
+    const CommandResult result = run_capture_command(build_download_command(range, true, limit_override, false));
     if (result.exit_code != 0) {
         throw std::runtime_error("download.py --dry-run failed with exit code " + std::to_string(result.exit_code) +
                                  "\n" + result.output);
     }
-
-    std::vector<std::filesystem::path> files;
-    std::istringstream lines(result.output);
-    std::string line;
-    while (std::getline(lines, line)) {
-        const auto arrow = line.rfind(" -> ");
-        if (arrow == std::string::npos) {
-            continue;
-        }
-        const std::string path_text = trim(line.substr(arrow + 4));
-        if (!path_text.empty()) {
-            files.emplace_back(path_text);
-        }
-    }
-    return files;
+    return parse_targets_from_manifest_output(result.output);
 }
 
 void DownloadClient::download_range(const ClosedDateRange &range, int limit_override) const {
@@ -54,8 +85,8 @@ void DownloadClient::download_range(const ClosedDateRange &range, int limit_over
     }
 }
 
-std::string DownloadClient::build_download_command(const ClosedDateRange &range, bool dry_run,
-                                                   int limit_override) const {
+std::string DownloadClient::build_download_command(const ClosedDateRange &range, bool dry_run, int limit_override,
+                                                   bool probe_size) const {
     std::ostringstream command;
     command << shell_escape(python_executable()) << " " << shell_escape(download_script_path()) << " --from-time "
             << shell_escape(format_utc_timestamp(range.start_epoch)) << " --until-time "
@@ -71,7 +102,10 @@ std::string DownloadClient::build_download_command(const ClosedDateRange &range,
         command << " --limit " << limit;
     }
     if (dry_run) {
-        command << " --dry-run";
+        command << " --dry-run --dry-run-format tsv";
+        if (probe_size) {
+            command << " --probe-size";
+        }
     }
     return command.str();
 }

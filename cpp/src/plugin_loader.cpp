@@ -20,6 +20,14 @@ struct RegisteredProcessorPlugin {
 
 std::string quote(std::string_view value) { return "'" + std::string(value) + "'"; }
 
+std::string strip_plugin_suffix(std::string_view value) {
+    constexpr std::string_view suffix = "_plugin";
+    if (value.size() > suffix.size() && value.substr(value.size() - suffix.size()) == suffix) {
+        return std::string(value.substr(0, value.size() - suffix.size()));
+    }
+    return std::string(value);
+}
+
 std::string join_plugin_names(const std::vector<RegisteredProcessorPlugin> &plugins) {
     if (plugins.empty()) {
         return "(none)";
@@ -103,11 +111,20 @@ bool is_same_path(const std::filesystem::path &left, const std::filesystem::path
 std::filesystem::path resolve_from_registered_plugins(const std::vector<RegisteredProcessorPlugin> &plugins,
                                                       std::string_view selector) {
     const std::string selector_text(selector);
+    const std::string selector_without_suffix = strip_plugin_suffix(selector);
     const std::filesystem::path selector_path(selector_text);
     std::vector<std::filesystem::path> matches;
 
     for (const RegisteredProcessorPlugin &plugin : plugins) {
-        if (plugin.name == selector_text || plugin.path.filename() == selector_text || plugin.path.stem() == selector_text ||
+        const std::string plugin_name_without_suffix = strip_plugin_suffix(plugin.name);
+        const std::string plugin_filename_without_suffix = strip_plugin_suffix(plugin.path.filename().string());
+        const std::string plugin_stem_without_suffix = strip_plugin_suffix(plugin.path.stem().string());
+
+        if (plugin.name == selector_text || plugin_name_without_suffix == selector_text ||
+            plugin_name_without_suffix == selector_without_suffix || plugin.path.filename() == selector_text ||
+            plugin_filename_without_suffix == selector_text || plugin_filename_without_suffix == selector_without_suffix ||
+            plugin.path.stem() == selector_text || plugin_stem_without_suffix == selector_text ||
+            plugin_stem_without_suffix == selector_without_suffix ||
             is_same_path(plugin.path, selector_path)) {
             matches.push_back(plugin.path);
         }

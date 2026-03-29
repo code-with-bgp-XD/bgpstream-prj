@@ -69,22 +69,30 @@ summarize_cache() {
   local file_count
   local total_bytes
   file_count="$(find "$cache_root" -type f | wc -l | tr -d ' ')"
-  total_bytes="$(find "$cache_root" -type f -printf '%s\n' | awk '{sum += $1} END {print sum + 0}')"
+  total_bytes="$(find "$cache_root" -type f -printf '%s\n' | awk 'BEGIN { sum = 0 } { sum += $1 } END { printf "%.0f\n", sum }')"
   printf "%s\n%s\n" "$file_count" "$total_bytes"
 }
 
 format_bytes() {
   local bytes="$1"
-  local units=("B" "KiB" "MiB" "GiB" "TiB")
-  local unit_index=0
-  local value="$bytes"
+  awk -v bytes="$bytes" '
+    BEGIN {
+      split("B KiB MiB GiB TiB", units, " ")
+      unit_index = 1
+      value = bytes + 0
 
-  while [ "$value" -ge 1024 ] && [ "$unit_index" -lt $((${#units[@]} - 1)) ]; do
-    value=$((value / 1024))
-    unit_index=$((unit_index + 1))
-  done
+      while (value >= 1024 && unit_index < length(units)) {
+        value /= 1024
+        unit_index += 1
+      }
 
-  printf "%s %s\n" "$value" "${units[$unit_index]}"
+      if (unit_index == 1) {
+        printf "%.0f %s\n", value, units[unit_index]
+      } else {
+        printf "%.1f %s\n", value, units[unit_index]
+      }
+    }
+  '
 }
 
 run_build() {

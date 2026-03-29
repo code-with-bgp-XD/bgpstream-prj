@@ -7,15 +7,22 @@
 
 namespace bgpstream_runner {
 
+struct DownloadTarget {
+    std::filesystem::path destination_path;
+    std::filesystem::path local_path;
+    std::uint64_t expected_size_bytes = 0;
+};
+
 class DownloadClient {
    public:
     explicit DownloadClient(Config config);
 
-    std::vector<std::filesystem::path> collect_target_files(const ClosedDateRange &range, int limit_override) const;
+    std::vector<DownloadTarget> collect_targets(const ClosedDateRange &range, int limit_override) const;
     void download_range(const ClosedDateRange &range, int limit_override) const;
 
    private:
-    std::string build_download_command(const ClosedDateRange &range, bool dry_run, int limit_override) const;
+    std::string build_download_command(const ClosedDateRange &range, bool dry_run, int limit_override,
+                                       bool probe_size = false) const;
     int resolve_limit(int limit_override) const;
     std::string download_script_path() const;
     std::string python_executable() const;

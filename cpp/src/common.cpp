@@ -378,7 +378,8 @@ std::string shell_escape(std::string_view value) {
 }
 
 CommandResult run_capture_command(const std::string &command) {
-    FILE *pipe = popen(command.c_str(), "r");
+    const std::string redirected_command = command + " 2>&1";
+    FILE *pipe = popen(redirected_command.c_str(), "r");
     if (pipe == nullptr) {
         throw std::runtime_error("Failed to execute command: " + command);
     }

@@ -156,14 +156,14 @@ RangeProcessingStats ChunkEngine::run() {
 
         increment_chunk_count();
         const std::string chunk_label = format_range_label(chunk);
-        std::vector<std::filesystem::path> target_files;
+        std::vector<DownloadTarget> targets;
 
         try {
             if (config_.log_phase_transitions) {
                 std::cout << "download phase " << chunk_label << std::endl;
             }
-            target_files = download_client_.collect_target_files(chunk, remaining_limit);
-            if (target_files.empty()) {
+            targets = download_client_.collect_targets(chunk, remaining_limit);
+            if (targets.empty()) {
                 const RangeProcessingStats stats = current_stats();
                 if (config_.log_chunk_summary) {
                     print_summary(std::cout, stats, "current cumulative stats after chunk " + chunk_label);
@@ -172,11 +172,11 @@ RangeProcessingStats ChunkEngine::run() {
                 continue;
             }
 
-            std::vector<std::filesystem::path> existing_files = existing_target_files(target_files);
-            if (existing_files.size() != target_files.size()) {
-                evict_cache_if_needed(target_files);
+            std::vector<std::filesystem::path> existing_files = existing_target_files(targets);
+            if (existing_files.size() != targets.size()) {
+                evict_cache_if_needed(targets);
                 download_client_.download_range(chunk, remaining_limit);
-                existing_files = existing_target_files(target_files);
+                existing_files = existing_target_files(targets);
             } else if (config_.log_phase_transitions) {
                 std::cout << "skip remote download " << chunk_label
                           << " because all target files are already cached locally" << std::endl;
@@ -204,7 +204,7 @@ RangeProcessingStats ChunkEngine::run() {
         }
 
         if (remaining_limit > 0) {
-            remaining_limit -= static_cast<int>(target_files.size());
+            remaining_limit -= static_cast<int>(targets.size());
             if (remaining_limit < 0) {
                 remaining_limit = 0;
             }
@@ -498,13 +498,12 @@ void ChunkEngine::record_skipped_parse_file() {
     stats_.skipped_parse_files += 1;
 }
 
-std::vector<std::filesystem::path> ChunkEngine::existing_target_files(
-    const std::vector<std::filesystem::path> &target_files) const {
+std::vector<std::filesystem::path> ChunkEngine::existing_target_files(const std::vector<DownloadTarget> &targets) const {
     std::vector<std::filesystem::path> existing_files;
-    existing_files.reserve(target_files.size());
-    for (const auto &file_path : target_files) {
-        if (std::filesystem::exists(file_path)) {
-            existing_files.push_back(file_path);
+    existing_files.reserve(targets.size());
+    for (const auto &target : targets) {
+        if (std::filesystem::exists(target.local_path)) {
+            existing_files.push_back(target.local_path);
         }
     }
     return existing_files;
@@ -525,19 +524,48 @@ std::uint64_t ChunkEngine::cache_size_bytes() const {
     return total_bytes;
 }
 
-void ChunkEngine::evict_cache_if_needed(const std::vector<std::filesystem::path> &protected_files) const {
+ChunkEngine::PlannedDownloadEstimate ChunkEngine::planned_download_bytes(
+    const std::vector<DownloadTarget> &targets) const {
+    PlannedDownloadEstimate estimate;
+    for (const auto &target : targets) {
+        if (std::filesystem::exists(target.local_path)) {
+            continue;
+        }
+
+        if (target.expected_size_bytes == 0) {
+            estimate.all_sizes_known = false;
+            continue;
+        }
+
+        const std::filesystem::path partial_path =
+            target.destination_path.parent_path() / (target.destination_path.filename().string() + ".part");
+        const std::uint64_t partial_bytes = safe_file_size(partial_path);
+        if (target.expected_size_bytes > partial_bytes) {
+            estimate.additional_bytes += target.expected_size_bytes - partial_bytes;
+        }
+    }
+    return estimate;
+}
+
+void ChunkEngine::evict_cache_if_needed(const std::vector<DownloadTarget> &targets) const {
     const std::uint64_t max_cache_bytes =
         static_cast<std::uint64_t>(config_.max_cache_size_gb * 1024.0 * 1024.0 * 1024.0);
-    if (cache_size_bytes() <= max_cache_bytes) {
+    const PlannedDownloadEstimate estimate = planned_download_bytes(targets);
+    const std::uint64_t current_cache_bytes = cache_size_bytes();
+    if (estimate.all_sizes_known && current_cache_bytes + estimate.additional_bytes <= max_cache_bytes) {
+        return;
+    }
+    if (!estimate.all_sizes_known && current_cache_bytes <= max_cache_bytes) {
         return;
     }
 
     std::unordered_set<std::string> protected_paths;
-    protected_paths.reserve(protected_files.size() * 2);
-    for (const auto &file_path : protected_files) {
-        protected_paths.insert(normalized_path_text(file_path));
+    protected_paths.reserve(targets.size() * 3);
+    for (const auto &target : targets) {
+        protected_paths.insert(normalized_path_text(target.local_path));
+        protected_paths.insert(normalized_path_text(target.destination_path));
         protected_paths.insert(
-            normalized_path_text(file_path.parent_path() / (file_path.filename().string() + ".part")));
+            normalized_path_text(target.destination_path.parent_path() / (target.destination_path.filename().string() + ".part")));
     }
 
     struct CacheEntry {
@@ -549,24 +577,30 @@ void ChunkEngine::evict_cache_if_needed(const std::vector<std::filesystem::path>
     std::vector<CacheEntry> entries;
     entries.reserve(1024);
     std::uint64_t total_bytes = 0;
-    for (const auto &entry : std::filesystem::recursive_directory_iterator(config_.output_dir)) {
-        if (!entry.is_regular_file()) {
-            continue;
+    if (std::filesystem::exists(config_.output_dir)) {
+        for (const auto &entry : std::filesystem::recursive_directory_iterator(config_.output_dir)) {
+            if (!entry.is_regular_file()) {
+                continue;
+            }
+
+            const std::filesystem::path path = entry.path();
+            const std::string canonical_path = normalized_path_text(path);
+            const std::uint64_t file_size = safe_file_size(path);
+            total_bytes += file_size;
+
+            if (protected_paths.find(canonical_path) != protected_paths.end()) {
+                continue;
+            }
+
+            entries.push_back(CacheEntry{path, file_size, entry.last_write_time()});
         }
-
-        const std::filesystem::path path = entry.path();
-        const std::string canonical_path = normalized_path_text(path);
-        const std::uint64_t file_size = safe_file_size(path);
-        total_bytes += file_size;
-
-        if (protected_paths.find(canonical_path) != protected_paths.end()) {
-            continue;
-        }
-
-        entries.push_back(CacheEntry{path, file_size, entry.last_write_time()});
     }
 
-    if (total_bytes <= max_cache_bytes) {
+    std::uint64_t pressure_bytes = total_bytes;
+    if (estimate.all_sizes_known) {
+        pressure_bytes += estimate.additional_bytes;
+    }
+    if (pressure_bytes <= max_cache_bytes) {
         return;
     }
 
@@ -576,7 +610,7 @@ void ChunkEngine::evict_cache_if_needed(const std::vector<std::filesystem::path>
     std::size_t removed_files = 0;
     std::uint64_t removed_bytes = 0;
     for (const auto &entry : entries) {
-        if (total_bytes <= max_cache_bytes) {
+        if (pressure_bytes <= max_cache_bytes) {
             break;
         }
 
@@ -586,13 +620,35 @@ void ChunkEngine::evict_cache_if_needed(const std::vector<std::filesystem::path>
             throw std::runtime_error("Failed to evict cache file " + entry.path.string() + ": " + error.message());
         }
         total_bytes -= entry.size;
+        if (pressure_bytes >= entry.size) {
+            pressure_bytes -= entry.size;
+        } else {
+            pressure_bytes = 0;
+        }
         removed_bytes += entry.size;
         removed_files += 1;
     }
 
+    if (pressure_bytes > max_cache_bytes) {
+        if (estimate.all_sizes_known) {
+            throw std::runtime_error("Cache limit " + format_bytes(max_cache_bytes) +
+                                     " is too small for the current chunk. Protected files plus pending downloads need " +
+                                     format_bytes(pressure_bytes) + " under " + config_.output_dir.string());
+        }
+        throw std::runtime_error("Cache limit " + format_bytes(max_cache_bytes) +
+                                 " is already exceeded by protected files under " + config_.output_dir.string() +
+                                 ", and pending download sizes are unknown.");
+    }
+
     if (config_.log_phase_transitions && removed_files > 0) {
-        std::cout << "cache eviction removed " << removed_files << " files, freed " << format_bytes(removed_bytes)
-                  << ", remaining cache approximately " << format_bytes(total_bytes) << std::endl;
+        std::cout << "cache eviction removed " << removed_files << " files, freed " << format_bytes(removed_bytes);
+        if (estimate.all_sizes_known) {
+            std::cout << ", projected cache after download approximately " << format_bytes(pressure_bytes);
+        } else {
+            std::cout << ", remaining cache approximately " << format_bytes(total_bytes)
+                      << " before pending downloads with unknown size";
+        }
+        std::cout << std::endl;
     }
 }
 

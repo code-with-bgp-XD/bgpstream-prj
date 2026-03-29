@@ -83,6 +83,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", default=DEFAULT_DATA_ROOT, help="Shared data root where files will be stored")
     parser.add_argument("--limit", type=int, default=None, help="Only download the first N matched resources")
     parser.add_argument("--dry-run", action="store_true", help="Only list matched resources, do not download")
+    parser.add_argument(
+        "--dry-run-format",
+        choices=["human", "tsv"],
+        default="human",
+        help="Dry-run output format. 'tsv' is intended for machine consumption.",
+    )
     return parser.parse_args()
 
 
@@ -833,6 +839,7 @@ def run_download(
     output_dir: str | Path = DEFAULT_DATA_ROOT,
     limit: int | None = None,
     dry_run: bool = False,
+    dry_run_format: str = "human",
 ) -> list[Path]:
     base_dir = Path(output_dir)
     start_epoch = parse_time(str(from_time)) if not isinstance(from_time, int) else from_time
@@ -841,7 +848,8 @@ def run_download(
     if end_epoch <= start_epoch:
         raise SystemExit("--until-time must be greater than --from-time")
 
-    print("fetching resource list...", flush=True)
+    if dry_run_format == "human":
+        print("fetching resource list...", flush=True)
     source_name, resources = resolve_resources(
         start_epoch=start_epoch,
         end_epoch=end_epoch,
@@ -855,7 +863,8 @@ def run_download(
         resources = resources[:limit]
 
     if not resources:
-        print("No matching resources found.")
+        if dry_run_format == "human":
+            print("No matching resources found.")
         return []
 
     if probe_size:
@@ -867,22 +876,29 @@ def run_download(
     for destination, resource in zip(destinations, resources):
         total_local_size += locally_available_bytes(base_dir, destination, resource)
 
-    print(f"collector: {collector}")
-    print(f"record_type: {record_type}")
-    print(f"source: {source_name}")
-    print(f"probe_size: {probe_size}")
-    print(f"workers: {workers}")
-    print(f"retry_rounds: {retries}")
-    print(f"matched_files: {len(resources)}")
-    if probe_size:
-        print(f"total_remote_size: {format_bytes(known_remote_size)}")
-        print(f"local_progress: {format_bytes(total_local_size)}/{format_bytes(known_remote_size)}")
-    else:
-        print(f"local_progress: {format_bytes(total_local_size)}")
-    print(f"output_dir: {base_dir.resolve()}")
+    if dry_run_format == "human":
+        print(f"collector: {collector}")
+        print(f"record_type: {record_type}")
+        print(f"source: {source_name}")
+        print(f"probe_size: {probe_size}")
+        print(f"workers: {workers}")
+        print(f"retry_rounds: {retries}")
+        print(f"matched_files: {len(resources)}")
+        if probe_size:
+            print(f"total_remote_size: {format_bytes(known_remote_size)}")
+            print(f"local_progress: {format_bytes(total_local_size)}/{format_bytes(known_remote_size)}")
+        else:
+            print(f"local_progress: {format_bytes(total_local_size)}")
+        print(f"output_dir: {base_dir.resolve()}")
 
     if dry_run:
         for resource, destination in zip(resources, destinations):
+            if dry_run_format == "tsv":
+                print(
+                    f"FILE\t{destination}\t{preferred_local_path(base_dir, resource)}\t{resource.remote_size}"
+                )
+                continue
+
             size_text = format_bytes(resource.remote_size) if resource.remote_size > 0 else "unknown"
             print(
                 f"{resource.initial_time} {resource.collector} {resource.record_type} "
@@ -990,6 +1006,7 @@ def main() -> None:
         output_dir=args.output_dir,
         limit=args.limit,
         dry_run=args.dry_run,
+        dry_run_format=args.dry_run_format,
     )
 
 
