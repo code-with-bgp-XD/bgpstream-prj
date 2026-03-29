@@ -1,0 +1,16 @@
+{
+  "start_date": "2025-01-01",
+  "end_date": "2025-01-2",
+  "project": "routeviews",
+  "collector": "route-views.sg",
+  "output_dir": "bgpdata",
+  "download_workers": 32,
+  "parser_workers": 8,
+  "message_batch_size": 4096,
+  "chunk_size": 2,
+  "chunk_unit": "day",
+  "limit": -1,
+  "log_phase_transitions": true,
+  "log_chunk_summary": true,
+  "log_final_summary": true
+}
