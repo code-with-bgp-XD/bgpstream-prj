@@ -17,7 +17,7 @@
 
 整体流程如下：
 
-1. 先读取根目录 `config.json`，再用命令行参数覆盖同名配置，最终构造 `Config`。
+1. 如果根目录存在本地 `config.json`，程序会先读取它；仓库里提交的是 `config.example.json` 模板。随后再用命令行参数覆盖同名配置，最终构造 `Config`。
 2. 按 `chunk_size + chunk_unit` 把 `start_date ~ end_date` 切成多个 `ClosedDateRange`。
 3. 对每个分片：
    - 用 `python/download.py --dry-run` 发现该分片需要的 update 文件。
@@ -36,7 +36,7 @@
 .
 ├── CMakeLists.txt
 ├── README.md
-├── config.json
+├── config.example.json
 ├── .clangd
 ├── python/
 │   ├── download.py
@@ -72,8 +72,8 @@
 - `.clangd`  
   告诉 clangd 去 `build/` 目录读取 `compile_commands.json`。
 
-- `config.json`  
-  根目录运行配置文件。用于配置：
+- `config.example.json`  
+  仓库内提交的配置模板。复制成本地 `config.json` 后即可作为实际运行配置文件。用于配置：
   - 起止日期
   - 分片大小
   - 下载线程数
@@ -229,9 +229,15 @@ cmake --build build
 
 ## 运行方式
 
-程序默认会尝试读取根目录下的 `config.json`。如果命令行里传了同名参数，命令行参数优先。
+程序默认会尝试读取根目录下的本地 `config.json`。该文件已被 `.gitignore` 忽略，不会被 Git 追踪。仓库里保留一份 [config.example.json](/home/fishtofu/bgpstream/config.example.json) 作为模板。如果命令行里传了同名参数，命令行参数优先。
 
-当前仓库自带的默认 `config.json` 适合测试，使用的是“按天切片”：
+建议先从模板创建本地配置：
+
+```bash
+cp config.example.json config.json
+```
+
+仓库内的默认模板内容如下，适合测试，使用的是“按天切片”：
 
 ```json
 {
