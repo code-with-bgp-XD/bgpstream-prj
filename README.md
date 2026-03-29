@@ -37,7 +37,7 @@
 
 ```text
 .
-├── cache.sh
+├── manage.sh
 ├── CMakeLists.txt
 ├── README.md
 ├── config.example.json
@@ -253,14 +253,24 @@ cmake --build build
 
 缓存目录默认是 `output_dir`。程序不会在每个分片结束后删除缓存文件；如果当前分片需要下载新文件，并且整个缓存目录已经明显超过 `max_cache_size_gb`，程序会在下载前按“最旧文件优先”做一次粗略清理。
 
-根目录下的 [cache.sh](/home/fishtofu/bgpstream/cache.sh) 可以直接管理缓存：
+根目录下的 [manage.sh](/home/fishtofu/bgpstream/manage.sh) 可以统一执行构建和缓存管理：
 
 ```bash
-./cache.sh size
-./cache.sh clear
+./manage.sh build
+./manage.sh cache-size
+./manage.sh cache-clear
 ```
 
-它会默认读取根目录的 `config.json` 里的 `output_dir`；也可以用 `--output-dir PATH` 临时覆盖。
+其中：
+
+- `build`
+  等价于执行 `cmake -S . -B build && cmake --build build`。
+- `cache-size`
+  读取根目录 `config.json` 里的 `output_dir`，统计当前缓存文件数量和总大小。
+- `cache-clear`
+  读取根目录 `config.json` 里的 `output_dir`，删除全部缓存文件。
+
+缓存相关命令也支持 `--output-dir PATH` 临时覆盖；构建命令支持 `--build-dir PATH` 指定构建目录。
 
 ---
 
