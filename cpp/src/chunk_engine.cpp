@@ -9,11 +9,15 @@ extern "C" {
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <exception>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <mutex>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -22,6 +26,10 @@ extern "C" {
 namespace bgpstream_runner {
 
 namespace {
+
+#ifndef BGPSTREAM_SOURCE_DIR
+#define BGPSTREAM_SOURCE_DIR "."
+#endif
 
 class ParseFailure : public std::runtime_error {
 public:
@@ -78,18 +86,69 @@ std::string format_parse_failure(const std::filesystem::path &file_path,
   return "解析跳过: " + file_path.filename().string() + " | " + reason;
 }
 
+std::filesystem::path record_root_dir() {
+  const std::filesystem::path configured_root = BGPSTREAM_SOURCE_DIR;
+  if (std::filesystem::exists(configured_root)) {
+    return configured_root;
+  }
+  return std::filesystem::current_path();
+}
+
+std::filesystem::path record_log_dir() {
+  const std::filesystem::path directory = record_root_dir() / "log";
+  std::error_code error;
+  std::filesystem::create_directories(directory, error);
+  if (error) {
+    throw std::runtime_error("Failed to create log directory " +
+                             directory.string() + ": " + error.message());
+  }
+  return directory;
+}
+
+std::filesystem::path make_record_file_path() {
+  const auto now = std::chrono::system_clock::now();
+  const std::time_t now_time = std::chrono::system_clock::to_time_t(now);
+
+  std::tm local_tm{};
+  if (localtime_r(&now_time, &local_tm) == nullptr) {
+    throw std::runtime_error(
+        "Failed to format local time for record file name");
+  }
+
+  std::ostringstream base_name;
+  base_name << "rcd-" << std::put_time(&local_tm, "%Y%m%d-%H:%M");
+
+  const std::filesystem::path root_dir = record_log_dir();
+  const std::string base_text = base_name.str();
+  std::filesystem::path candidate = root_dir / base_text;
+  if (!std::filesystem::exists(candidate)) {
+    return candidate;
+  }
+
+  std::ostringstream output;
+  for (std::uint32_t suffix = 1;; ++suffix) {
+    output.str("");
+    output.clear();
+    output << base_text << '-' << std::setfill('0') << std::setw(3) << suffix;
+    candidate = root_dir / output.str();
+    if (!std::filesystem::exists(candidate)) {
+      return candidate;
+    }
+  }
+  return candidate;
+}
+
 } // namespace
 
 ChunkEngine::ChunkEngine(Config config, MessageProcessor &processor)
     : config_(std::move(config)), download_client_(config_),
-      processor_(processor) {}
+      processor_(processor), record_file_path_(make_record_file_path()) {}
 
 RangeProcessingStats ChunkEngine::run() {
+  reset_stats();
   const ClosedDateRange range = parse_closed_date_range(config_);
   const std::vector<ClosedDateRange> chunks =
       split_range_by_chunks(range, config_.chunk_size, config_.chunk_unit);
-
-  RangeProcessingStats stats;
   int remaining_limit = config_.limit;
 
   for (const ClosedDateRange &chunk : chunks) {
@@ -97,7 +156,7 @@ RangeProcessingStats ChunkEngine::run() {
       break;
     }
 
-    stats.chunk_count += 1;
+    increment_chunk_count();
     const std::string chunk_label = format_range_label(chunk);
     std::vector<std::filesystem::path> target_files;
 
@@ -108,10 +167,14 @@ RangeProcessingStats ChunkEngine::run() {
       target_files =
           download_client_.collect_target_files(chunk, remaining_limit);
       if (target_files.empty()) {
+        const RangeProcessingStats stats = current_stats();
         if (config_.log_chunk_summary) {
           print_summary(std::cout, stats,
                         "current cumulative stats after chunk " + chunk_label);
         }
+        write_record_file(stats,
+                          "current cumulative stats after chunk " + chunk_label,
+                          "chunk-complete");
         continue;
       }
 
@@ -129,7 +192,7 @@ RangeProcessingStats ChunkEngine::run() {
         if (config_.log_phase_transitions) {
           std::cout << "process phase " << chunk_label << std::endl;
         }
-        process_files(existing_files, chunk, &stats);
+        process_files(existing_files, chunk);
       } else {
         if (config_.log_phase_transitions) {
           std::cout << "skip process phase " << chunk_label
@@ -137,10 +200,14 @@ RangeProcessingStats ChunkEngine::run() {
         }
       }
 
+      const RangeProcessingStats stats = current_stats();
       if (config_.log_chunk_summary) {
         print_summary(std::cout, stats,
                       "current cumulative stats after chunk " + chunk_label);
       }
+      write_record_file(stats,
+                        "current cumulative stats after chunk " + chunk_label,
+                        "chunk-complete");
     } catch (...) {
       try {
         cleanup_chunk_files(target_files);
@@ -163,7 +230,12 @@ RangeProcessingStats ChunkEngine::run() {
     }
   }
 
-  return stats;
+  return current_stats();
+}
+
+RangeProcessingStats ChunkEngine::current_stats() const {
+  std::lock_guard<std::mutex> lock(stats_mutex_);
+  return stats_;
 }
 
 void ChunkEngine::print_summary(std::ostream &out,
@@ -193,9 +265,38 @@ void ChunkEngine::print_summary(std::ostream &out,
   out << std::flush;
 }
 
+std::filesystem::path ChunkEngine::write_record_file(
+    const RangeProcessingStats &stats, std::string_view title,
+    std::string_view run_status, std::string_view error_message) const {
+  std::lock_guard<std::mutex> lock(record_file_mutex_);
+  const bool already_exists = std::filesystem::exists(record_file_path_);
+  const bool has_content =
+      already_exists && safe_file_size(record_file_path_) > 0;
+
+  std::ofstream output(record_file_path_, std::ios::app);
+  if (!output) {
+    throw std::runtime_error("Failed to open record file: " +
+                             record_file_path_.string());
+  }
+
+  if (has_content) {
+    output << '\n';
+  }
+  output << "============================================================\n";
+
+  const auto now =
+      std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+  output << "record_generated_at: " << format_utc_timestamp(now) << '\n';
+  output << "run_status: " << run_status << '\n';
+  if (!error_message.empty()) {
+    output << "error_message: " << error_message << '\n';
+  }
+  print_summary(output, stats, title);
+  return record_file_path_;
+}
+
 void ChunkEngine::process_files(const std::vector<std::filesystem::path> &files,
-                                const ClosedDateRange &chunk,
-                                RangeProcessingStats *stats) {
+                                const ClosedDateRange &chunk) {
   if (files.empty()) {
     return;
   }
@@ -206,10 +307,6 @@ void ChunkEngine::process_files(const std::vector<std::filesystem::path> &files,
 
   try {
     std::atomic<std::size_t> next_file_index{0};
-    std::atomic<std::uint64_t> visited_messages{0};
-    std::atomic<std::uint64_t> announcement_messages{0};
-    std::atomic<std::uint64_t> withdrawal_messages{0};
-    std::atomic<std::uint64_t> skipped_parse_files{0};
     std::mutex processor_mutex;
     std::mutex parse_failures_mutex;
     std::mutex fatal_error_mutex;
@@ -234,14 +331,9 @@ void ChunkEngine::process_files(const std::vector<std::filesystem::path> &files,
             try {
               const FileTraversalStats file_stats =
                   traverse_single_file(file_path, chunk, &processor_mutex);
-              visited_messages.fetch_add(file_stats.visited_messages,
-                                         std::memory_order_relaxed);
-              announcement_messages.fetch_add(file_stats.announcement_messages,
-                                              std::memory_order_relaxed);
-              withdrawal_messages.fetch_add(file_stats.withdrawal_messages,
-                                            std::memory_order_relaxed);
+              record_processed_file(file_stats);
             } catch (const ParseFailure &exc) {
-              skipped_parse_files.fetch_add(1, std::memory_order_relaxed);
+              record_skipped_parse_file();
               std::lock_guard<std::mutex> lock(parse_failures_mutex);
               parse_failures.push_back(
                   format_parse_failure(file_path, exc.what()));
@@ -270,15 +362,6 @@ void ChunkEngine::process_files(const std::vector<std::filesystem::path> &files,
     for (const auto &message : parse_failures) {
       std::cerr << message << '\n';
     }
-
-    stats->files_used += files.size();
-    stats->visited_messages += visited_messages.load(std::memory_order_relaxed);
-    stats->announcement_messages +=
-        announcement_messages.load(std::memory_order_relaxed);
-    stats->withdrawal_messages +=
-        withdrawal_messages.load(std::memory_order_relaxed);
-    stats->skipped_parse_files +=
-        skipped_parse_files.load(std::memory_order_relaxed);
   } catch (...) {
     progress.close();
     throw;
@@ -422,6 +505,30 @@ ChunkEngine::traverse_single_file(const std::filesystem::path &file_path,
     destroy_stream();
     throw;
   }
+}
+
+void ChunkEngine::reset_stats() {
+  std::lock_guard<std::mutex> lock(stats_mutex_);
+  stats_ = RangeProcessingStats{};
+}
+
+void ChunkEngine::increment_chunk_count() {
+  std::lock_guard<std::mutex> lock(stats_mutex_);
+  stats_.chunk_count += 1;
+}
+
+void ChunkEngine::record_processed_file(const FileTraversalStats &file_stats) {
+  std::lock_guard<std::mutex> lock(stats_mutex_);
+  stats_.files_used += 1;
+  stats_.visited_messages += file_stats.visited_messages;
+  stats_.announcement_messages += file_stats.announcement_messages;
+  stats_.withdrawal_messages += file_stats.withdrawal_messages;
+}
+
+void ChunkEngine::record_skipped_parse_file() {
+  std::lock_guard<std::mutex> lock(stats_mutex_);
+  stats_.files_used += 1;
+  stats_.skipped_parse_files += 1;
 }
 
 void ChunkEngine::cleanup_chunk_files(

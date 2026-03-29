@@ -6,6 +6,7 @@ std::string_view PrefixAsStatsProcessor::name() const {
   return "prefix_as_stats";
 }
 
+// 这个函数同一时间只会有一个线程在调用.
 void PrefixAsStatsProcessor::handle_messages(const std::vector<BGPMessage> &messages) {
   for (const auto &message : messages) {
     if (message.type != BGPMessageType::Announcement) {

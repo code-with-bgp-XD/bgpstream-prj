@@ -4,3 +4,5 @@ bgpdata/
 build/
 .cache/
 config.json
+log/
+rcd-*
