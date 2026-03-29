@@ -211,6 +211,7 @@ RangeProcessingStats ChunkEngine::run() {
         }
     }
 
+    processor_.finalize();
     return current_stats();
 }
 

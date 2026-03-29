@@ -156,6 +156,9 @@
   - `handle_messages(const std::vector<BGPMessage>&)`
     批量处理报文。
     这里采用“批量”而不是“逐条虚函数调用”，目的是降低虚调用开销。
+  - `finalize()`
+    在整个时间范围内的文件都处理完成后调用一次，适合做最终汇总或收尾处理。
+    默认实现为空，不要求每个插件都重写。
   - `print_summary(std::ostream&)`
     输出处理器自己的统计结果。
 

@@ -14,6 +14,7 @@ class MessageProcessor {
 
     virtual std::string_view name() const = 0;
     virtual void handle_messages(const std::vector<BGPMessage> &messages) = 0;
+    virtual void finalize() {}
     virtual void print_summary(std::ostream &out) const = 0;
 };
 
