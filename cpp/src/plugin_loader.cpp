@@ -191,7 +191,7 @@ std::filesystem::path LoadedProcessorPlugin::resolve_plugin_path(const Config &c
     }
 
     if (registered_plugins.empty()) {
-        throw std::runtime_error("No processor plugins are registered. Add one under local/ and rebuild, or pass "
+        throw std::runtime_error("No processor plugins are registered. Add one under plugins/<plugin_name>/ and rebuild, or pass "
                                  "--processor-plugin PATH to load an external plugin.");
     }
     if (registered_plugins.size() > 1) {

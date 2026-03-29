@@ -95,10 +95,7 @@ target_link_libraries(
 )
 
 add_subdirectory(examples)
-
-if(EXISTS "${CMAKE_SOURCE_DIR}/local/CMakeLists.txt")
-  add_subdirectory(local)
-endif()
+add_subdirectory(plugins)
 
 get_property(BGPSTREAM_PROCESSOR_PLUGIN_TARGETS GLOBAL PROPERTY BGPSTREAM_PROCESSOR_PLUGIN_TARGETS)
 set(BGPSTREAM_PROCESSOR_PLUGIN_MANIFEST_CONTENT "")

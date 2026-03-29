@@ -43,7 +43,11 @@
 ├── config.example.json
 ├── .clangd
 ├── examples/                      # 仓库内置示例插件
-├── local/                         # 用户自定义处理器目录，默认不被 Git 追踪
+├── plugins/                       # 受 Git 跟踪的持久插件目录
+│   └── count_prefix_freq/         # 一个插件一个子目录
+│       ├── CMakeLists.txt
+│       ├── count_prefix_freq.cpp
+│       └── render_prefix_frequency_report.py
 ├── python/
 │   ├── download.py
 └── cpp/
@@ -74,7 +78,7 @@
 - `CMakeLists.txt`
   项目构建入口。强制 out-of-source build，要求使用 `cmake -S . -B build`。
   同时开启 `CMAKE_EXPORT_COMPILE_COMMANDS=ON`，因此会在 `build/compile_commands.json` 生成 clangd 可用的编译数据库。
-  另外还提供了 `bgpstream_add_processor_plugin(...)`，供 `examples/` 里的示例插件和 `local/` 里的自定义插件复用。
+  另外还提供了 `bgpstream_add_processor_plugin(...)`，供 `examples/` 和 `plugins/` 里的插件复用。
 
 - `.clangd`
   告诉 clangd 去 `build/` 目录读取 `compile_commands.json`。
@@ -181,6 +185,14 @@
 - `examples/example_origin_asn_plugin.cpp`
   这些文件提供了几个体量很小的示例处理器，便于参考实现方式，也可以直接通过根目录 `config.json` 的 `processor_plugin` 字段切换使用。
 
+### 持久插件
+
+- `plugins/CMakeLists.txt`
+  自动扫描 `plugins/<plugin_name>/CMakeLists.txt`，把每个子目录当作一个独立插件接入构建。
+
+- `plugins/count_prefix_freq/`
+  当前仓库里一个受版本控制的持久插件示例。它统计各前缀出现频次，并在处理结束后生成 CSV、JSON 和 SVG 统计图。
+
 ### 主入口
 
 - `cpp/src/main.cpp`
@@ -216,7 +228,7 @@
 
 - 所有处理器插件都通过 `bgpstream_add_processor_plugin(...)` 注册到构建系统。
 - 构建完成后，主程序会读取 `build/bgpstream_processor_plugins.tsv` 来发现可用插件。
-- 当前仓库默认会注册多个 `examples/` 示例插件，因此通常需要在根目录 `config.json` 的 `processor_plugin` 字段里显式指定插件名。
+- 当前仓库默认会同时注册 `examples/` 和 `plugins/` 里的多个插件，因此通常需要在根目录 `config.json` 的 `processor_plugin` 字段里显式指定插件名。
 - 也可以用 `--processor-plugin NAME_OR_PATH` 临时覆盖根目录 `config.json` 里的同名字段。
 
 ---
@@ -435,19 +447,20 @@ cp config.example.json config.json
 
 ---
 
-## 本地自定义处理器
+## 自定义处理器
 
-如果你想添加自己的 `BGPMessage` 处理器，当前推荐的方式是不改仓库里的主代码，而是在本地 `local/` 目录下新增一个插件。这个目录已经被 Git 忽略，专门留给用户自己的实验代码；仓库内置示例已经移到 `examples/`。
+如果你想添加自己的 `BGPMessage` 处理器，当前推荐的方式是不改仓库里的主代码，而是在 `plugins/` 目录下为每个插件单独建一个子目录。`plugins/` 受 Git 跟踪，适合放需要长期保留和协作维护的插件。
 
 最小流程如下：
 
-1. 新建 `local/my_processor.cpp`
-2. 在里面继承 `MessageProcessor`
-3. 用 `BGPSTREAM_RUNNER_EXPORT_PROCESSOR(...)` 导出工厂函数
-4. 新建 `local/CMakeLists.txt`
-5. 在 `local/CMakeLists.txt` 里调用 `bgpstream_add_processor_plugin(...)`
-6. 重新执行 `cmake -S . -B build && cmake --build build`
-7. 如果当前只注册了这一个插件，可以直接运行主程序；如果注册了多个插件，就在根目录 `config.json` 里的 `processor_plugin` 字段指定其中一个
+1. 新建 `plugins/my_processor/`
+2. 在其中新建 `plugins/my_processor/my_processor.cpp`
+3. 在里面继承 `MessageProcessor`
+4. 用 `BGPSTREAM_RUNNER_EXPORT_PROCESSOR(...)` 导出工厂函数
+5. 新建 `plugins/my_processor/CMakeLists.txt`
+6. 在 `plugins/my_processor/CMakeLists.txt` 里调用 `bgpstream_add_processor_plugin(...)`
+7. 重新执行 `cmake -S . -B build && cmake --build build`
+8. 如果当前只注册了这一个插件，可以直接运行主程序；如果注册了多个插件，就在根目录 `config.json` 里的 `processor_plugin` 字段指定其中一个
 
 一个最小示例：
 
@@ -474,7 +487,7 @@ class MyProcessor : public bgpstream_runner::MessageProcessor {
 BGPSTREAM_RUNNER_EXPORT_PROCESSOR(MyProcessor)
 ```
 
-对应的 `local/CMakeLists.txt` 可以写成：
+对应的 `plugins/my_processor/CMakeLists.txt` 可以写成：
 
 ```cmake
 bgpstream_add_processor_plugin(
@@ -497,7 +510,32 @@ bgpstream_add_processor_plugin(
 ./build/bgpstream_prefix_stats
 ```
 
-仓库当前附带了一个本地示例插件：
+这样每个插件都有独立的目录，可以自行放置：
+
+- C++ 源文件
+- Python 收尾脚本
+- 插件自己的 `CMakeLists.txt`
+- 插件专用的 README、模板、辅助文件
+
+例如当前的持久插件就是：
+
+- `plugins/count_prefix_freq/CMakeLists.txt`
+- `plugins/count_prefix_freq/count_prefix_freq.cpp`
+- `plugins/count_prefix_freq/render_prefix_frequency_report.py`
+
+它对应的 `processor_plugin` 取值是：
+
+- `count_prefix_freq_plugin`
+
+根目录 `config.json` 里可以直接这样写：
+
+```json
+{
+  "processor_plugin": "count_prefix_freq_plugin"
+}
+```
+
+仓库当前附带的示例插件还有：
 
 - `examples/example_message_summary_plugin.cpp`
   统计处理过的报文数、带前缀的 announcement / withdrawal 数量，以及唯一前缀数。
@@ -528,4 +566,4 @@ bgpstream_add_processor_plugin(
 
 把这个字段改成不同插件名，就可以在不改 `main.cpp`、不增加额外配置文件的情况下切换处理逻辑。
 
-这样用户自己的自定义处理器源码、构建规则和实验逻辑都可以留在 `local/` 下，不会被 Git 追踪；仓库里稳定不变的中层框架、下载逻辑和 `main.cpp` 入口都不需要改动。`examples/` 则专门用来放受版本控制的示例插件。
+这样每个持久插件都放在 `plugins/<plugin_name>/` 下，结构清晰，也更适合长期维护；`examples/` 则专门用来放仓库自带的最小示例插件。
