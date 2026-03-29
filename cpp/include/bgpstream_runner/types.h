@@ -20,51 +20,51 @@ inline constexpr int kDefaultMessageBatchSize = 4096;
 inline constexpr int kDefaultChunkSize = 1;
 
 enum class ChunkUnit {
-  Day,
-  Month,
+    Day,
+    Month,
 };
 
 struct Config {
-  std::string start_date = kDefaultStartDate;
-  std::string end_date = kDefaultEndDate;
-  std::string project = kDefaultProject;
-  std::string collector = kDefaultCollector;
-  std::filesystem::path output_dir = kDefaultDataRoot;
-  int download_workers = kDefaultDownloadWorkers;
-  int parser_workers = kDefaultParserWorkers;
-  int message_batch_size = kDefaultMessageBatchSize;
-  int chunk_size = kDefaultChunkSize;
-  ChunkUnit chunk_unit = ChunkUnit::Month;
-  int limit = -1;
-  bool log_phase_transitions = true;
-  bool log_chunk_summary = true;
-  bool log_final_summary = true;
+    std::string start_date = kDefaultStartDate;
+    std::string end_date = kDefaultEndDate;
+    std::string project = kDefaultProject;
+    std::string collector = kDefaultCollector;
+    std::filesystem::path output_dir = kDefaultDataRoot;
+    int download_workers = kDefaultDownloadWorkers;
+    int parser_workers = kDefaultParserWorkers;
+    int message_batch_size = kDefaultMessageBatchSize;
+    int chunk_size = kDefaultChunkSize;
+    ChunkUnit chunk_unit = ChunkUnit::Month;
+    int limit = -1;
+    bool log_phase_transitions = true;
+    bool log_chunk_summary = true;
+    bool log_final_summary = true;
 };
 
 struct ClosedDateRange {
-  std::time_t start_epoch{};
-  std::time_t end_exclusive_epoch{};
+    std::time_t start_epoch{};
+    std::time_t end_exclusive_epoch{};
 };
 
 struct RangeProcessingStats {
-  std::size_t files_used = 0;
-  std::size_t chunk_count = 0;
-  std::uint64_t visited_messages = 0;
-  std::uint64_t announcement_messages = 0;
-  std::uint64_t withdrawal_messages = 0;
-  std::uint64_t skipped_parse_files = 0;
+    std::size_t files_used = 0;
+    std::size_t chunk_count = 0;
+    std::uint64_t visited_messages = 0;
+    std::uint64_t announcement_messages = 0;
+    std::uint64_t withdrawal_messages = 0;
+    std::uint64_t skipped_parse_files = 0;
 };
 
 enum class BGPMessageType {
-  Announcement,
-  Withdrawal,
+    Announcement,
+    Withdrawal,
 };
 
 struct BGPMessage {
-  BGPMessageType type = BGPMessageType::Announcement;
-  std::time_t timestamp{};
-  std::string prefix;
-  std::vector<std::uint32_t> asns;
+    BGPMessageType type = BGPMessageType::Announcement;
+    std::time_t timestamp{};
+    std::string prefix;
+    std::vector<std::uint32_t> asns;
 };
 
-} // namespace bgpstream_runner
+}  // namespace bgpstream_runner

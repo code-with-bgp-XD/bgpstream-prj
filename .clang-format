@@ -1,0 +1,38 @@
+# 基于 Google 基础风格
+BasedOnStyle: Google
+
+# 每一行最多 120 个字符
+ColumnLimit: 120
+
+# 缩进宽度（Google 默认是 2，如果你习惯 4 可以自行修改）
+IndentWidth: 4
+
+# 允许短函数定义在同一行
+# 例如：void f() { return; }
+AllowShortFunctionsOnASingleLine: All
+
+# 允许短的 if 语句保持在同一行
+# 例如：if (a) return;
+AllowShortIfStatementsOnASingleLine: true
+
+# 允许短的循环保持在同一行
+AllowShortLoopsOnASingleLine: true
+
+# 允许短的枚举定义在同一行
+AllowShortEnumsOnASingleLine: true
+
+# 指针和引用的对齐方式（Google 默认靠左：int* p）
+# 如果你喜欢靠右（int *p），可以改为 Right
+PointerAlignment: Left
+
+# 在大括号前换行的规则
+BreakBeforeBraces: Attach
+
+# 排序头文件（按字母顺序自动重排 #include）
+SortIncludes: true
+
+# 针对 C++ 语言的特定配置
+Language: Cpp
+
+# 强制在命名空间注释（例如 // namespace name）
+FixNamespaceComments: true

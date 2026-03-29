@@ -1,11 +1,11 @@
 #pragma once
 
-#include "bgpstream_runner/types.h"
-
 #include <filesystem>
+
+#include "bgpstream_runner/types.h"
 
 namespace bgpstream_runner {
 
 void apply_json_config_file(const std::filesystem::path &path, Config *config);
 
-} // namespace bgpstream_runner
+}  // namespace bgpstream_runner
