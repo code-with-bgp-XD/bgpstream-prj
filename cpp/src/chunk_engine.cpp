@@ -86,11 +86,11 @@ std::filesystem::path record_root_dir() {
     if (std::filesystem::exists(configured_root)) {
         return configured_root;
     }
-  return std::filesystem::current_path();
+    return std::filesystem::current_path();
 }
 
 std::string normalized_path_text(const std::filesystem::path &path) {
-  return std::filesystem::absolute(path).lexically_normal().string();
+    return std::filesystem::absolute(path).lexically_normal().string();
 }
 
 std::filesystem::path record_log_dir() {
@@ -132,7 +132,7 @@ std::filesystem::path make_record_file_path() {
             return candidate;
         }
     }
-  return candidate;
+    return candidate;
 }
 
 }  // namespace
@@ -198,7 +198,7 @@ RangeProcessingStats ChunkEngine::run() {
             if (config_.log_chunk_summary) {
                 print_summary(std::cout, stats, "current cumulative stats after chunk " + chunk_label);
             }
-                write_record_file(stats, "current cumulative stats after chunk " + chunk_label, "chunk-complete");
+            write_record_file(stats, "current cumulative stats after chunk " + chunk_label, "chunk-complete");
         } catch (...) {
             throw;
         }
@@ -240,7 +240,9 @@ void ChunkEngine::print_summary(std::ostream &out, const RangeProcessingStats &s
     out << "announcement_messages: " << stats.announcement_messages << '\n';
     out << "withdrawal_messages: " << stats.withdrawal_messages << '\n';
     out << "skipped_parse_files: " << stats.skipped_parse_files << '\n';
+    out << "============================= plugin output =============================" << '\n';
     processor_.print_summary(out);
+    out << "=========================== plugin output end ===========================" << '\n';
     out << std::flush;
 }
 
@@ -523,8 +525,8 @@ std::uint64_t ChunkEngine::cache_size_bytes() const {
 }
 
 void ChunkEngine::evict_cache_if_needed(const std::vector<std::filesystem::path> &protected_files) const {
-    const std::uint64_t max_cache_bytes = static_cast<std::uint64_t>(
-        config_.max_cache_size_gb * 1024.0 * 1024.0 * 1024.0);
+    const std::uint64_t max_cache_bytes =
+        static_cast<std::uint64_t>(config_.max_cache_size_gb * 1024.0 * 1024.0 * 1024.0);
     if (cache_size_bytes() <= max_cache_bytes) {
         return;
     }
@@ -533,7 +535,8 @@ void ChunkEngine::evict_cache_if_needed(const std::vector<std::filesystem::path>
     protected_paths.reserve(protected_files.size() * 2);
     for (const auto &file_path : protected_files) {
         protected_paths.insert(normalized_path_text(file_path));
-        protected_paths.insert(normalized_path_text(file_path.parent_path() / (file_path.filename().string() + ".part")));
+        protected_paths.insert(
+            normalized_path_text(file_path.parent_path() / (file_path.filename().string() + ".part")));
     }
 
     struct CacheEntry {
@@ -566,9 +569,8 @@ void ChunkEngine::evict_cache_if_needed(const std::vector<std::filesystem::path>
         return;
     }
 
-    std::sort(entries.begin(), entries.end(), [](const CacheEntry &lhs, const CacheEntry &rhs) {
-        return lhs.last_write_time < rhs.last_write_time;
-    });
+    std::sort(entries.begin(), entries.end(),
+              [](const CacheEntry &lhs, const CacheEntry &rhs) { return lhs.last_write_time < rhs.last_write_time; });
 
     std::size_t removed_files = 0;
     std::uint64_t removed_bytes = 0;
@@ -588,9 +590,8 @@ void ChunkEngine::evict_cache_if_needed(const std::vector<std::filesystem::path>
     }
 
     if (config_.log_phase_transitions && removed_files > 0) {
-        std::cout << "cache eviction removed " << removed_files << " files, freed "
-                  << format_bytes(removed_bytes) << ", remaining cache approximately "
-                  << format_bytes(total_bytes) << std::endl;
+        std::cout << "cache eviction removed " << removed_files << " files, freed " << format_bytes(removed_bytes)
+                  << ", remaining cache approximately " << format_bytes(total_bytes) << std::endl;
     }
 }
 

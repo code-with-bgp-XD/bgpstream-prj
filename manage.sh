@@ -9,18 +9,20 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 command_name=""
 output_dir_override=""
 build_dir="$DEFAULT_BUILD_DIR"
+run_args=()
 
 usage() {
   cat <<'EOF'
-Usage: ./manage.sh <build|cache-size|cache-clear> [options]
+Usage: ./manage.sh <build|run|cache-size|cache-clear> [options] [-- program_args...]
 
 Commands:
   build                      Configure and build the project
+  run                        Configure, build, and run the project executable
   cache-size                 Show cached file count and total size
   cache-clear                Delete all cached files under output_dir
 
 Options:
-  --build-dir PATH           Override the build directory for the build command
+  --build-dir PATH           Override the build directory for build/run
   --output-dir PATH          Override output_dir for cache commands
   --help, -h                 Show this help text
 EOF
@@ -87,14 +89,35 @@ format_bytes() {
 
 run_build() {
   local resolved_build_dir
+  resolved_build_dir="$(resolve_build_dir)"
+
+  cmake -S "$repo_root" -B "$resolved_build_dir"
+  cmake --build "$resolved_build_dir"
+}
+
+resolve_build_dir() {
+  local resolved_build_dir
   if [[ "$build_dir" = /* ]]; then
     resolved_build_dir="$build_dir"
   else
     resolved_build_dir="$repo_root/$build_dir"
   fi
 
-  cmake -S "$repo_root" -B "$resolved_build_dir"
-  cmake --build "$resolved_build_dir"
+  printf "%s\n" "$resolved_build_dir"
+}
+
+run_program() {
+  local resolved_build_dir
+  local executable_path
+  resolved_build_dir="$(resolve_build_dir)"
+  executable_path="$resolved_build_dir/bgpstream_prefix_stats"
+
+  if [ ! -x "$executable_path" ]; then
+    echo "Executable does not exist or is not runnable: $executable_path" >&2
+    exit 1
+  fi
+
+  "$executable_path" "${run_args[@]}"
 }
 
 run_cache_size() {
@@ -130,7 +153,7 @@ run_cache_clear() {
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    build|cache-size|cache-clear)
+    build|run|cache-size|cache-clear)
       if [ -n "$command_name" ]; then
         echo "Only one command may be provided." >&2
         usage >&2
@@ -138,6 +161,11 @@ while [ "$#" -gt 0 ]; do
       fi
       command_name="$1"
       shift
+      ;;
+    --)
+      shift
+      run_args=("$@")
+      break
       ;;
     --build-dir)
       if [ "$#" -lt 2 ]; then
@@ -175,6 +203,10 @@ fi
 case "$command_name" in
   build)
     run_build
+    ;;
+  run)
+    run_build
+    run_program
     ;;
   cache-size)
     run_cache_size "$(resolve_cache_root)"

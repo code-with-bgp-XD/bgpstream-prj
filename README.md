@@ -257,6 +257,7 @@ cmake --build build
 
 ```bash
 ./manage.sh build
+./manage.sh run
 ./manage.sh cache-size
 ./manage.sh cache-clear
 ```
@@ -265,12 +266,19 @@ cmake --build build
 
 - `build`
   等价于执行 `cmake -S . -B build && cmake --build build`。
+- `run`
+  先执行一次构建，再启动 `build/bgpstream_prefix_stats`。
 - `cache-size`
   读取根目录 `config.json` 里的 `output_dir`，统计当前缓存文件数量和总大小。
 - `cache-clear`
   读取根目录 `config.json` 里的 `output_dir`，删除全部缓存文件。
 
-缓存相关命令也支持 `--output-dir PATH` 临时覆盖；构建命令支持 `--build-dir PATH` 指定构建目录。
+缓存相关命令也支持 `--output-dir PATH` 临时覆盖；`build` 和 `run` 支持 `--build-dir PATH` 指定构建目录。
+如果需要给主程序透传参数，可以使用 `--`，例如：
+
+```bash
+./manage.sh run -- --start-date 2025-11-01 --end-date 2025-12-01
+```
 
 ---
 
