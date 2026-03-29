@@ -9,6 +9,7 @@
   "message_batch_size": 1048576,
   "chunk_size": 1,
   "chunk_unit": "day",
+  "max_cache_size_gb": 5.0,
   "limit": -1,
   "log_phase_transitions": true,
   "log_chunk_summary": true,

@@ -1,5 +1,6 @@
 #include "bgpstream_runner/config_file.h"
 
+#include <cmath>
 #include <cctype>
 #include <fstream>
 #include <sstream>
@@ -13,7 +14,7 @@ namespace {
 
 enum class JsonScalarKind {
     String,
-    Integer,
+    Number,
     Boolean,
     Null,
 };
@@ -21,7 +22,7 @@ enum class JsonScalarKind {
 struct JsonScalar {
     JsonScalarKind kind = JsonScalarKind::Null;
     std::string string_value;
-    long long integer_value = 0;
+    double number_value = 0;
     bool bool_value = false;
 };
 
@@ -159,22 +160,45 @@ class JsonConfigParser {
         }
     }
 
-    long long parse_integer() {
+    double parse_number() {
         const std::size_t start = position_;
         if (peek() == '-') {
             ++position_;
         }
         if (!std::isdigit(static_cast<unsigned char>(peek()))) {
-            error("Expected integer");
+            error("Expected number");
         }
         while (std::isdigit(static_cast<unsigned char>(peek())) != 0) {
             ++position_;
         }
 
+        if (peek() == '.') {
+            ++position_;
+            if (!std::isdigit(static_cast<unsigned char>(peek()))) {
+                error("Expected digits after decimal point");
+            }
+            while (std::isdigit(static_cast<unsigned char>(peek())) != 0) {
+                ++position_;
+            }
+        }
+
+        if (peek() == 'e' || peek() == 'E') {
+            ++position_;
+            if (peek() == '+' || peek() == '-') {
+                ++position_;
+            }
+            if (!std::isdigit(static_cast<unsigned char>(peek()))) {
+                error("Expected exponent digits");
+            }
+            while (std::isdigit(static_cast<unsigned char>(peek())) != 0) {
+                ++position_;
+            }
+        }
+
         try {
-            return std::stoll(text_.substr(start, position_ - start));
+            return std::stod(text_.substr(start, position_ - start));
         } catch (const std::exception &) {
-            error("Invalid integer value");
+            error("Invalid number value");
         }
     }
 
@@ -188,8 +212,8 @@ class JsonConfigParser {
             return value;
         }
         if (ch == '-' || std::isdigit(static_cast<unsigned char>(ch)) != 0) {
-            value.kind = JsonScalarKind::Integer;
-            value.integer_value = parse_integer();
+            value.kind = JsonScalarKind::Number;
+            value.number_value = parse_number();
             return value;
         }
         if (consume_literal("true")) {
@@ -211,10 +235,21 @@ class JsonConfigParser {
     }
 
     int require_int(const std::string &key, const JsonScalar &value) const {
-        if (value.kind != JsonScalarKind::Integer) {
+        if (value.kind != JsonScalarKind::Number) {
             throw std::runtime_error("Config key '" + key + "' must be an integer");
         }
-        return static_cast<int>(value.integer_value);
+        double integral_part = 0;
+        if (std::modf(value.number_value, &integral_part) != 0.0) {
+            throw std::runtime_error("Config key '" + key + "' must be an integer");
+        }
+        return static_cast<int>(value.number_value);
+    }
+
+    double require_number(const std::string &key, const JsonScalar &value) const {
+        if (value.kind != JsonScalarKind::Number) {
+            throw std::runtime_error("Config key '" + key + "' must be a number");
+        }
+        return value.number_value;
     }
 
     bool require_bool(const std::string &key, const JsonScalar &value) const {
@@ -263,6 +298,8 @@ class JsonConfigParser {
             config_->chunk_size = require_int(key, value);
         } else if (key == "chunk_unit") {
             config_->chunk_unit = require_chunk_unit(key, value);
+        } else if (key == "max_cache_size_gb") {
+            config_->max_cache_size_gb = require_number(key, value);
         } else if (key == "limit") {
             if (value.kind == JsonScalarKind::Null) {
                 config_->limit = -1;

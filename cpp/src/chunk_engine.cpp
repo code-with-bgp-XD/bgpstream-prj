@@ -135,9 +135,6 @@ std::filesystem::path make_record_file_path() {
   return candidate;
 }
 
-constexpr std::uint64_t kApproximateMaxCacheBytes =
-    10ULL * 1024ULL * 1024ULL * 1024ULL;
-
 }  // namespace
 
 ChunkEngine::ChunkEngine(Config config, MessageProcessor &processor)
@@ -236,6 +233,7 @@ void ChunkEngine::print_summary(std::ostream &out, const RangeProcessingStats &s
     out << "message_batch_size: " << config_.message_batch_size << '\n';
     out << "chunk_size: " << config_.chunk_size << '\n';
     out << "chunk_unit: " << chunk_unit_to_string(config_.chunk_unit) << '\n';
+    out << "max_cache_size_gb: " << config_.max_cache_size_gb << '\n';
     out << "processed_chunks: " << stats.chunk_count << '\n';
     out << "files_used: " << stats.files_used << '\n';
     out << "visited_messages: " << stats.visited_messages << '\n';
@@ -525,7 +523,9 @@ std::uint64_t ChunkEngine::cache_size_bytes() const {
 }
 
 void ChunkEngine::evict_cache_if_needed(const std::vector<std::filesystem::path> &protected_files) const {
-    if (cache_size_bytes() <= kApproximateMaxCacheBytes) {
+    const std::uint64_t max_cache_bytes = static_cast<std::uint64_t>(
+        config_.max_cache_size_gb * 1024.0 * 1024.0 * 1024.0);
+    if (cache_size_bytes() <= max_cache_bytes) {
         return;
     }
 
@@ -562,7 +562,7 @@ void ChunkEngine::evict_cache_if_needed(const std::vector<std::filesystem::path>
         entries.push_back(CacheEntry{path, file_size, entry.last_write_time()});
     }
 
-    if (total_bytes <= kApproximateMaxCacheBytes) {
+    if (total_bytes <= max_cache_bytes) {
         return;
     }
 
@@ -573,7 +573,7 @@ void ChunkEngine::evict_cache_if_needed(const std::vector<std::filesystem::path>
     std::size_t removed_files = 0;
     std::uint64_t removed_bytes = 0;
     for (const auto &entry : entries) {
-        if (total_bytes <= kApproximateMaxCacheBytes) {
+        if (total_bytes <= max_cache_bytes) {
             break;
         }
 

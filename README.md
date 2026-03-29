@@ -22,7 +22,7 @@
 3. 对每个分片：
    - 用 `python/download.py --dry-run` 发现该分片需要的 update 文件。
    - 先检查这些文件是否已经缓存到本地；如果都在，就直接跳过远端下载。
-   - 如果有缺失文件，先粗略检查整个缓存目录大小；当缓存明显超过约 `10 GiB` 时，按“最旧文件优先”删除一批旧缓存，再下载当前缺失文件。
+   - 如果有缺失文件，先粗略检查整个缓存目录大小；当缓存明显超过 `max_cache_size_gb` 配置值时，按“最旧文件优先”删除一批旧缓存，再下载当前缺失文件。
    - 实际下载当前缺失的分片文件。
    - 使用 `bgpstream` 的 `singlefile` 接口遍历该分片所有文件中的 announcement / withdrawal。
    - 中层把报文组装成 `std::vector<BGPMessage>` 批量交给处理器。
@@ -242,7 +242,7 @@ cmake --build build
 - announcement / withdrawal / visited_messages 统计
 - 当前处理器的业务统计结果，例如 `unique_prefixes`、`prefix_scoped_as_total`
 
-缓存目录默认是 `output_dir`。程序不会在每个分片结束后删除缓存文件；如果当前分片需要下载新文件，并且整个缓存目录已经明显超过约 `10 GiB`，程序会在下载前按“最旧文件优先”做一次粗略清理。
+缓存目录默认是 `output_dir`。程序不会在每个分片结束后删除缓存文件；如果当前分片需要下载新文件，并且整个缓存目录已经明显超过 `max_cache_size_gb`，程序会在下载前按“最旧文件优先”做一次粗略清理。
 
 根目录下的 [cache.sh](/home/fishtofu/bgpstream/cache.sh) 可以直接管理缓存：
 
@@ -276,9 +276,10 @@ cp config.example.json config.json
   "output_dir": "bgpdata",
   "download_workers": 32,
   "parser_workers": 8,
-  "message_batch_size": 4096,
+  "message_batch_size": 1048576,
   "chunk_size": 1,
   "chunk_unit": "day",
+  "max_cache_size_gb": 10,
   "limit": -1,
   "log_phase_transitions": true,
   "log_chunk_summary": true,
@@ -306,6 +307,7 @@ cp config.example.json config.json
 
 - `--chunk-size N`
 - `--chunk-unit day|month`
+- `--max-cache-size-gb N`
 
 当前 `config.json` 支持的主要字段：
 
@@ -319,6 +321,7 @@ cp config.example.json config.json
 - `message_batch_size`
 - `chunk_size`
 - `chunk_unit`
+- `max_cache_size_gb`
 - `limit`
 - `log_phase_transitions`
 - `log_chunk_summary`
@@ -359,6 +362,9 @@ cp config.example.json config.json
   - `chunk_size = 1`, `chunk_unit = "day"` 表示按天处理
   - `chunk_size = 1`, `chunk_unit = "month"` 表示按月处理
   - `chunk_size = 7`, `chunk_unit = "day"` 表示按 7 天处理
+
+- `max_cache_size_gb`
+  本地缓存目录的大致上限，单位是 `GiB`，支持小数，例如 `1.5`。当当前分片需要下载新文件，而且缓存总量已经明显超过这个值时，程序会在下载前按“最旧文件优先”粗略删除一批旧缓存。
 
 - `limit`
   下载文件数量限制。

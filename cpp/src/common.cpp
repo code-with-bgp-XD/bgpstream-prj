@@ -216,6 +216,7 @@ void FileProgressDisplay::close_locked() {
            << "  --message-batch-size N\n"
            << "  --chunk-size N\n"
            << "  --chunk-unit day|month\n"
+           << "  --max-cache-size-gb NUMBER\n"
            << "  --log-phase-transitions true|false\n"
            << "  --log-chunk-summary true|false\n"
            << "  --log-final-summary true|false\n"
@@ -277,6 +278,8 @@ Config parse_args(int argc, char **argv) {
             } else {
                 throw std::runtime_error("--chunk-unit must be day or month");
             }
+        } else if (arg == "--max-cache-size-gb") {
+            config.max_cache_size_gb = std::stod(require_value("--max-cache-size-gb"));
         } else if (arg == "--log-phase-transitions") {
             const std::string value = require_value("--log-phase-transitions");
             if (value == "true") {
@@ -324,6 +327,9 @@ Config parse_args(int argc, char **argv) {
     }
     if (config.chunk_size < 1) {
         throw std::runtime_error("--chunk-size must be at least 1");
+    }
+    if (config.max_cache_size_gb <= 0) {
+        throw std::runtime_error("--max-cache-size-gb must be greater than 0");
     }
     if (config.limit == 0 || config.limit < -1) {
         throw std::runtime_error("--limit must be positive, or omitted");

@@ -18,6 +18,7 @@ inline constexpr int kDefaultDownloadWorkers = 32;
 inline constexpr int kDefaultParserWorkers = 8;
 inline constexpr int kDefaultMessageBatchSize = 4096;
 inline constexpr int kDefaultChunkSize = 1;
+inline constexpr double kDefaultMaxCacheSizeGiB = 10.0;
 
 enum class ChunkUnit {
     Day,
@@ -35,6 +36,7 @@ struct Config {
     int message_batch_size = kDefaultMessageBatchSize;
     int chunk_size = kDefaultChunkSize;
     ChunkUnit chunk_unit = ChunkUnit::Month;
+    double max_cache_size_gb = kDefaultMaxCacheSizeGiB;
     int limit = -1;
     bool log_phase_transitions = true;
     bool log_chunk_summary = true;
