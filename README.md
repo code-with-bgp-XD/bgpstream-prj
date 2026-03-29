@@ -21,11 +21,13 @@
 2. 按 `chunk_size + chunk_unit` 把 `start_date ~ end_date` 切成多个 `ClosedDateRange`。
 3. 对每个分片：
    - 用 `python/download.py --dry-run` 发现该分片需要的 update 文件。
-   - 实际下载该分片文件。
+   - 先检查这些文件是否已经缓存到本地；如果都在，就直接跳过远端下载。
+   - 如果有缺失文件，先粗略检查整个缓存目录大小；当缓存明显超过约 `10 GiB` 时，按“最旧文件优先”删除一批旧缓存，再下载当前缺失文件。
+   - 实际下载当前缺失的分片文件。
    - 使用 `bgpstream` 的 `singlefile` 接口遍历该分片所有文件中的 announcement / withdrawal。
    - 中层把报文组装成 `std::vector<BGPMessage>` 批量交给处理器。
    - 输出一次当前累计统计。
-   - 删除当前分片对应的本地文件和 `.part` 文件。
+   - 保留已经下载的文件，作为后续实验的本地缓存。
 4. 所有分片完成后，输出最终累计统计。
 5. 每次程序启动只会生成一个 `log/rcd-*` 日志文件。每个分片处理结束后、正常结束时、异常退出时，都会把当前累计统计追加到同一个文件里。
 
@@ -35,13 +37,13 @@
 
 ```text
 .
+├── cache.sh
 ├── CMakeLists.txt
 ├── README.md
 ├── config.example.json
 ├── .clangd
 ├── python/
 │   ├── download.py
-│   └── main.py
 └── cpp/
     ├── include/bgpstream_runner/
     │   ├── types.h
@@ -91,9 +93,6 @@
   - 输出 dry-run 结果
   - 下载 update 文件
   - 处理断点续传、重试和进度显示
-
-- `python/main.py`
-  早期 Python 版本的统计入口，目前不是主执行路径。当前主路径已经切到 C++。
 
 ### C++ 公共类型与工具
 
@@ -242,6 +241,17 @@ cmake --build build
 - 已使用文件数
 - announcement / withdrawal / visited_messages 统计
 - 当前处理器的业务统计结果，例如 `unique_prefixes`、`prefix_scoped_as_total`
+
+缓存目录默认是 `output_dir`。程序不会在每个分片结束后删除缓存文件；如果当前分片需要下载新文件，并且整个缓存目录已经明显超过约 `10 GiB`，程序会在下载前按“最旧文件优先”做一次粗略清理。
+
+根目录下的 [cache.sh](/home/fishtofu/bgpstream/cache.sh) 可以直接管理缓存：
+
+```bash
+./cache.sh size
+./cache.sh clear
+```
+
+它会默认读取根目录的 `config.json` 里的 `output_dir`；也可以用 `--output-dir PATH` 临时覆盖。
 
 ---
 

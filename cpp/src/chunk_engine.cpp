@@ -86,7 +86,11 @@ std::filesystem::path record_root_dir() {
     if (std::filesystem::exists(configured_root)) {
         return configured_root;
     }
-    return std::filesystem::current_path();
+  return std::filesystem::current_path();
+}
+
+std::string normalized_path_text(const std::filesystem::path &path) {
+  return std::filesystem::absolute(path).lexically_normal().string();
 }
 
 std::filesystem::path record_log_dir() {
@@ -128,8 +132,11 @@ std::filesystem::path make_record_file_path() {
             return candidate;
         }
     }
-    return candidate;
+  return candidate;
 }
+
+constexpr std::uint64_t kApproximateMaxCacheBytes =
+    10ULL * 1024ULL * 1024ULL * 1024ULL;
 
 }  // namespace
 
@@ -168,14 +175,14 @@ RangeProcessingStats ChunkEngine::run() {
                 continue;
             }
 
-            download_client_.download_range(chunk, remaining_limit);
-
-            std::vector<std::filesystem::path> existing_files;
-            existing_files.reserve(target_files.size());
-            for (const auto &file_path : target_files) {
-                if (std::filesystem::exists(file_path)) {
-                    existing_files.push_back(file_path);
-                }
+            std::vector<std::filesystem::path> existing_files = existing_target_files(target_files);
+            if (existing_files.size() != target_files.size()) {
+                evict_cache_if_needed(target_files);
+                download_client_.download_range(chunk, remaining_limit);
+                existing_files = existing_target_files(target_files);
+            } else if (config_.log_phase_transitions) {
+                std::cout << "skip remote download " << chunk_label
+                          << " because all target files are already cached locally" << std::endl;
             }
 
             if (!existing_files.empty()) {
@@ -194,20 +201,10 @@ RangeProcessingStats ChunkEngine::run() {
             if (config_.log_chunk_summary) {
                 print_summary(std::cout, stats, "current cumulative stats after chunk " + chunk_label);
             }
-            write_record_file(stats, "current cumulative stats after chunk " + chunk_label, "chunk-complete");
+                write_record_file(stats, "current cumulative stats after chunk " + chunk_label, "chunk-complete");
         } catch (...) {
-            try {
-                cleanup_chunk_files(target_files);
-            } catch (const std::exception &cleanup_exc) {
-                std::cerr << cleanup_exc.what() << '\n';
-            }
             throw;
         }
-
-        if (config_.log_phase_transitions) {
-            std::cout << "cleanup phase " << chunk_label << std::endl;
-        }
-        cleanup_chunk_files(target_files);
 
         if (remaining_limit > 0) {
             remaining_limit -= static_cast<int>(target_files.size());
@@ -500,21 +497,100 @@ void ChunkEngine::record_skipped_parse_file() {
     stats_.skipped_parse_files += 1;
 }
 
-void ChunkEngine::cleanup_chunk_files(const std::vector<std::filesystem::path> &target_files) const {
+std::vector<std::filesystem::path> ChunkEngine::existing_target_files(
+    const std::vector<std::filesystem::path> &target_files) const {
+    std::vector<std::filesystem::path> existing_files;
+    existing_files.reserve(target_files.size());
     for (const auto &file_path : target_files) {
-        std::error_code error;
-        std::filesystem::remove(file_path, error);
-        if (error) {
-            throw std::runtime_error("Failed to remove chunk file " + file_path.string() + ": " + error.message());
+        if (std::filesystem::exists(file_path)) {
+            existing_files.push_back(file_path);
+        }
+    }
+    return existing_files;
+}
+
+std::uint64_t ChunkEngine::cache_size_bytes() const {
+    if (!std::filesystem::exists(config_.output_dir)) {
+        return 0;
+    }
+
+    std::uint64_t total_bytes = 0;
+    for (const auto &entry : std::filesystem::recursive_directory_iterator(config_.output_dir)) {
+        if (!entry.is_regular_file()) {
+            continue;
+        }
+        total_bytes += safe_file_size(entry.path());
+    }
+    return total_bytes;
+}
+
+void ChunkEngine::evict_cache_if_needed(const std::vector<std::filesystem::path> &protected_files) const {
+    if (cache_size_bytes() <= kApproximateMaxCacheBytes) {
+        return;
+    }
+
+    std::unordered_set<std::string> protected_paths;
+    protected_paths.reserve(protected_files.size() * 2);
+    for (const auto &file_path : protected_files) {
+        protected_paths.insert(normalized_path_text(file_path));
+        protected_paths.insert(normalized_path_text(file_path.parent_path() / (file_path.filename().string() + ".part")));
+    }
+
+    struct CacheEntry {
+        std::filesystem::path path;
+        std::uint64_t size = 0;
+        std::filesystem::file_time_type last_write_time;
+    };
+
+    std::vector<CacheEntry> entries;
+    entries.reserve(1024);
+    std::uint64_t total_bytes = 0;
+    for (const auto &entry : std::filesystem::recursive_directory_iterator(config_.output_dir)) {
+        if (!entry.is_regular_file()) {
+            continue;
         }
 
-        const auto partial_path = file_path.parent_path() / (file_path.filename().string() + ".part");
-        error.clear();
-        std::filesystem::remove(partial_path, error);
-        if (error) {
-            throw std::runtime_error("Failed to remove chunk partial file " + partial_path.string() + ": " +
-                                     error.message());
+        const std::filesystem::path path = entry.path();
+        const std::string canonical_path = normalized_path_text(path);
+        const std::uint64_t file_size = safe_file_size(path);
+        total_bytes += file_size;
+
+        if (protected_paths.find(canonical_path) != protected_paths.end()) {
+            continue;
         }
+
+        entries.push_back(CacheEntry{path, file_size, entry.last_write_time()});
+    }
+
+    if (total_bytes <= kApproximateMaxCacheBytes) {
+        return;
+    }
+
+    std::sort(entries.begin(), entries.end(), [](const CacheEntry &lhs, const CacheEntry &rhs) {
+        return lhs.last_write_time < rhs.last_write_time;
+    });
+
+    std::size_t removed_files = 0;
+    std::uint64_t removed_bytes = 0;
+    for (const auto &entry : entries) {
+        if (total_bytes <= kApproximateMaxCacheBytes) {
+            break;
+        }
+
+        std::error_code error;
+        std::filesystem::remove(entry.path, error);
+        if (error) {
+            throw std::runtime_error("Failed to evict cache file " + entry.path.string() + ": " + error.message());
+        }
+        total_bytes -= entry.size;
+        removed_bytes += entry.size;
+        removed_files += 1;
+    }
+
+    if (config_.log_phase_transitions && removed_files > 0) {
+        std::cout << "cache eviction removed " << removed_files << " files, freed "
+                  << format_bytes(removed_bytes) << ", remaining cache approximately "
+                  << format_bytes(total_bytes) << std::endl;
     }
 }
 
