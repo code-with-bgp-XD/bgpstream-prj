@@ -6,3 +6,6 @@ build/
 config.json
 log/
 rcd-*
+
+# 插件的生成数据的输出文件夹,默认为output
+**/output/
