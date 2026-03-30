@@ -118,7 +118,7 @@ run_program() {
   local resolved_build_dir
   local executable_path
   resolved_build_dir="$(resolve_build_dir)"
-  executable_path="$resolved_build_dir/bgpstream_prefix_stats"
+  executable_path="$resolved_build_dir/bgpstream_analyzer"
 
   if [ ! -x "$executable_path" ]; then
     echo "Executable does not exist or is not runnable: $executable_path" >&2

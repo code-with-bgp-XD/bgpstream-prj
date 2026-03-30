@@ -244,7 +244,7 @@ cmake --build build
 
 构建后主要产物：
 
-- `build/bgpstream_prefix_stats`
+- `build/bgpstream_analyzer`
 - `build/bgpstream_processor_plugins.tsv`
 - `build/compile_commands.json`
 
@@ -282,7 +282,7 @@ cmake --build build
 - `build`
   等价于执行 `cmake -S . -B build && cmake --build build`。
 - `run`
-  先执行一次构建，再启动 `build/bgpstream_prefix_stats`。
+  先执行一次构建，再启动 `build/bgpstream_analyzer`。
 - `cache-size`
   读取根目录 `config.json` 里的 `output_dir`，统计当前缓存文件数量和总大小。
 - `cache-clear`
@@ -333,7 +333,7 @@ cp config.example.json config.json
 示例：
 
 ```bash
-./build/bgpstream_prefix_stats \
+./build/bgpstream_analyzer \
   --start-date 2025-11-01 \
   --end-date 2025-12-01 \
   --download-workers 4 \
@@ -507,7 +507,7 @@ bgpstream_add_processor_plugin(
 然后运行：
 
 ```bash
-./build/bgpstream_prefix_stats
+./build/bgpstream_analyzer
 ```
 
 这样每个插件都有独立的目录，可以自行放置：

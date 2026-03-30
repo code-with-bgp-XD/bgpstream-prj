@@ -76,19 +76,19 @@ function(bgpstream_add_processor_plugin target_name)
 endfunction()
 
 add_executable(
-  bgpstream_prefix_stats
+  bgpstream_analyzer
   cpp/src/main.cpp
   cpp/src/plugin_loader.cpp
 )
 
 target_include_directories(
-  bgpstream_prefix_stats
+  bgpstream_analyzer
   PRIVATE
     cpp/include
 )
 
 target_link_libraries(
-  bgpstream_prefix_stats
+  bgpstream_analyzer
   PRIVATE
     bgpstream_runner_core
     ${CMAKE_DL_LIBS}
