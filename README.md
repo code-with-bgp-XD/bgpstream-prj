@@ -397,7 +397,7 @@ cp config.example.json config.json
   下载阶段的并发线程数。值越大，单分片下载速度通常越快，但也会增加网络和上游服务压力。
 
 - `parser_workers`
-  C++ 中层遍历本地 MRT 文件时的并发线程数。通常对应“同时解析多少个文件”。
+  C++ 中层遍历本地 MRT 文件时的并发线程数。通常对应“同时解析多少个文件”。注意，增加这个线程数会显著增加内存占用，请不要设置为太大的值。
 
 - `message_batch_size`
   中层交给处理器的单批报文数量。中层会先把报文聚成一个 `std::vector<BGPMessage>`，再调用一次处理器的 `handle_messages()`。
