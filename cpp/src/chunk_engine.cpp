@@ -18,6 +18,8 @@ extern "C" {
 #include <string>
 #include <thread>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
 #include "bgpstream_runner/chunk_engine.h"
 #include "bgpstream_runner/common.h"
@@ -51,30 +53,291 @@ std::string prefix_to_string(const bgpstream_pfx_t &prefix) {
     return std::string(buffer);
 }
 
-void append_asns_from_path(const bgpstream_as_path_t *as_path, std::vector<std::uint32_t> *ases) {
+std::string address_to_string(const bgpstream_ip_addr_t &address) {
+    if (address.version == BGPSTREAM_ADDR_VERSION_UNKNOWN) {
+        return {};
+    }
+
+    char buffer[INET6_ADDRSTRLEN];
+    if (bgpstream_addr_ntop(buffer, sizeof(buffer), &address) == nullptr) {
+        throw ParseFailure(std::string("Failed to stringify IP address: ") + std::strerror(errno));
+    }
+    return std::string(buffer);
+}
+
+std::string as_path_to_string(const bgpstream_as_path_t *as_path) {
+    if (as_path == nullptr) {
+        return {};
+    }
+
+    std::vector<char> buffer(256);
+    while (true) {
+        const int required = bgpstream_as_path_snprintf(buffer.data(), buffer.size(), as_path);
+        if (required < 0) {
+            throw ParseFailure("Failed to stringify AS path");
+        }
+        if (static_cast<std::size_t>(required) < buffer.size()) {
+            return std::string(buffer.data(), static_cast<std::size_t>(required));
+        }
+        buffer.resize(static_cast<std::size_t>(required) + 1);
+    }
+}
+
+ASPathSegmentType as_path_segment_type_from_bgpstream(std::uint8_t type) {
+    switch (type) {
+        case BGPSTREAM_AS_PATH_SEG_ASN:
+            return ASPathSegmentType::ASN;
+        case BGPSTREAM_AS_PATH_SEG_SET:
+            return ASPathSegmentType::Set;
+        case BGPSTREAM_AS_PATH_SEG_CONFED_SEQ:
+            return ASPathSegmentType::ConfederationSequence;
+        case BGPSTREAM_AS_PATH_SEG_CONFED_SET:
+            return ASPathSegmentType::ConfederationSet;
+        default:
+            return ASPathSegmentType::Unknown;
+    }
+}
+
+void append_as_path(bgpstream_as_path_t *as_path, BGPMessage *message) {
     if (as_path == nullptr) {
         return;
+    }
+
+    message->has_as_path = true;
+    message->as_path = as_path_to_string(as_path);
+
+    const int segment_count = bgpstream_as_path_get_len(as_path);
+    if (segment_count > 0) {
+        message->as_path_segments.reserve(static_cast<std::size_t>(segment_count));
+        message->asns.reserve(static_cast<std::size_t>(segment_count));
     }
 
     bgpstream_as_path_iter_t iter;
     bgpstream_as_path_iter_reset(&iter);
 
     while (bgpstream_as_path_seg_t *seg = bgpstream_as_path_get_next_seg(as_path, &iter)) {
-        switch (seg->type) {
-            case BGPSTREAM_AS_PATH_SEG_ASN:
-                ases->push_back(seg->asn.asn);
-                break;
-            case BGPSTREAM_AS_PATH_SEG_SET:
-            case BGPSTREAM_AS_PATH_SEG_CONFED_SEQ:
-            case BGPSTREAM_AS_PATH_SEG_CONFED_SET:
-                for (std::uint8_t index = 0; index < seg->set.asn_cnt; ++index) {
-                    ases->push_back(seg->set.asn[index]);
-                }
-                break;
-            default:
-                break;
+        ASPathSegment segment;
+        segment.type = as_path_segment_type_from_bgpstream(seg->type);
+
+        if (seg->type == BGPSTREAM_AS_PATH_SEG_ASN) {
+            segment.asns.push_back(seg->asn.asn);
+        } else {
+            segment.asns.reserve(seg->set.asn_cnt);
+            for (std::uint8_t index = 0; index < seg->set.asn_cnt; ++index) {
+                segment.asns.push_back(seg->set.asn[index]);
+            }
+        }
+
+        message->asns.insert(message->asns.end(), segment.asns.begin(), segment.asns.end());
+        message->as_path_segments.push_back(std::move(segment));
+    }
+
+    std::uint32_t origin_asn = 0;
+    if (bgpstream_as_path_get_origin_val(as_path, &origin_asn) == 0) {
+        message->origin_asn = origin_asn;
+    }
+}
+
+void append_communities(const bgpstream_community_set_t *community_set, BGPMessage *message) {
+    if (community_set == nullptr) {
+        return;
+    }
+
+    message->has_communities = true;
+    const int community_count = bgpstream_community_set_size(community_set);
+    if (community_count <= 0) {
+        return;
+    }
+
+    message->communities.reserve(static_cast<std::size_t>(community_count));
+    for (int index = 0; index < community_count; ++index) {
+        const bgpstream_community_t *community = bgpstream_community_set_get(community_set, index);
+        if (community == nullptr) {
+            throw ParseFailure("Failed to read community from community set");
+        }
+        message->communities.push_back(BGPCommunity{community->asn, community->value});
+    }
+}
+
+BGPRecordType record_type_from_bgpstream(bgpstream_record_type_t type) {
+    switch (type) {
+        case BGPSTREAM_UPDATE:
+            return BGPRecordType::Update;
+        case BGPSTREAM_RIB:
+            return BGPRecordType::RIB;
+        default:
+            return BGPRecordType::Unknown;
+    }
+}
+
+BGPRecordStatus record_status_from_bgpstream(bgpstream_record_status_t status) {
+    switch (status) {
+        case BGPSTREAM_RECORD_STATUS_VALID_RECORD:
+            return BGPRecordStatus::Valid;
+        case BGPSTREAM_RECORD_STATUS_FILTERED_SOURCE:
+            return BGPRecordStatus::FilteredSource;
+        case BGPSTREAM_RECORD_STATUS_EMPTY_SOURCE:
+            return BGPRecordStatus::EmptySource;
+        case BGPSTREAM_RECORD_STATUS_OUTSIDE_TIME_INTERVAL:
+            return BGPRecordStatus::OutsideTimeInterval;
+        case BGPSTREAM_RECORD_STATUS_CORRUPTED_SOURCE:
+            return BGPRecordStatus::CorruptedSource;
+        case BGPSTREAM_RECORD_STATUS_CORRUPTED_RECORD:
+            return BGPRecordStatus::CorruptedRecord;
+        case BGPSTREAM_RECORD_STATUS_UNSUPPORTED_RECORD:
+            return BGPRecordStatus::UnsupportedRecord;
+        default:
+            return BGPRecordStatus::Unknown;
+    }
+}
+
+BGPDumpPosition dump_position_from_bgpstream(bgpstream_dump_position_t position) {
+    switch (position) {
+        case BGPSTREAM_DUMP_START:
+            return BGPDumpPosition::Start;
+        case BGPSTREAM_DUMP_MIDDLE:
+            return BGPDumpPosition::Middle;
+        case BGPSTREAM_DUMP_END:
+            return BGPDumpPosition::End;
+        default:
+            return BGPDumpPosition::Unknown;
+    }
+}
+
+BGPOrigin origin_from_bgpstream(bgpstream_elem_origin_type_t origin) {
+    switch (origin) {
+        case BGPSTREAM_ELEM_BGP_UPDATE_ORIGIN_IGP:
+            return BGPOrigin::IGP;
+        case BGPSTREAM_ELEM_BGP_UPDATE_ORIGIN_EGP:
+            return BGPOrigin::EGP;
+        case BGPSTREAM_ELEM_BGP_UPDATE_ORIGIN_INCOMPLETE:
+            return BGPOrigin::Incomplete;
+        default:
+            return BGPOrigin::Unknown;
+    }
+}
+
+BGPPeerState peer_state_from_bgpstream(bgpstream_elem_peerstate_t state) {
+    switch (state) {
+        case BGPSTREAM_ELEM_PEERSTATE_IDLE:
+            return BGPPeerState::Idle;
+        case BGPSTREAM_ELEM_PEERSTATE_CONNECT:
+            return BGPPeerState::Connect;
+        case BGPSTREAM_ELEM_PEERSTATE_ACTIVE:
+            return BGPPeerState::Active;
+        case BGPSTREAM_ELEM_PEERSTATE_OPENSENT:
+            return BGPPeerState::OpenSent;
+        case BGPSTREAM_ELEM_PEERSTATE_OPENCONFIRM:
+            return BGPPeerState::OpenConfirm;
+        case BGPSTREAM_ELEM_PEERSTATE_ESTABLISHED:
+            return BGPPeerState::Established;
+        case BGPSTREAM_ELEM_PEERSTATE_CLEARING:
+            return BGPPeerState::Clearing;
+        case BGPSTREAM_ELEM_PEERSTATE_DELETED:
+            return BGPPeerState::Deleted;
+        case BGPSTREAM_ELEM_PEERSTATE_UNKNOWN:
+        default:
+            return BGPPeerState::Unknown;
+    }
+}
+
+std::optional<BGPMessageType> message_type_from_bgpstream(bgpstream_elem_type_t type) {
+    switch (type) {
+        case BGPSTREAM_ELEM_TYPE_RIB:
+            return BGPMessageType::RIB;
+        case BGPSTREAM_ELEM_TYPE_ANNOUNCEMENT:
+            return BGPMessageType::Announcement;
+        case BGPSTREAM_ELEM_TYPE_WITHDRAWAL:
+            return BGPMessageType::Withdrawal;
+        case BGPSTREAM_ELEM_TYPE_PEERSTATE:
+            return BGPMessageType::PeerState;
+#if defined(BGPSTREAM_MAJOR_VERSION) && defined(BGPSTREAM_MID_VERSION) && \
+    (BGPSTREAM_MAJOR_VERSION > 2 || (BGPSTREAM_MAJOR_VERSION == 2 && BGPSTREAM_MID_VERSION >= 4))
+        case BGPSTREAM_ELEM_TYPE_END_OF_RIB:
+            return BGPMessageType::EndOfRib;
+#endif
+        case BGPSTREAM_ELEM_TYPE_UNKNOWN:
+        default:
+            return std::nullopt;
+    }
+}
+
+bool message_has_prefix(BGPMessageType type) {
+    return type == BGPMessageType::RIB || type == BGPMessageType::Announcement ||
+           type == BGPMessageType::Withdrawal;
+}
+
+bool message_has_path_attributes(BGPMessageType type) {
+    return type == BGPMessageType::RIB || type == BGPMessageType::Announcement;
+}
+
+std::string record_source_name(const char *record_value, const std::string &configured_value) {
+    const std::string value = record_value == nullptr ? std::string{} : std::string(record_value);
+    if (value.empty() || value == "singlefile") {
+        return configured_value;
+    }
+    return value;
+}
+
+BGPMessage make_bgp_message(const bgpstream_record_t &record, const bgpstream_elem_t &elem,
+                            BGPMessageType message_type, const Config &config, const std::string &source_file,
+                            std::uint64_t record_index, std::uint64_t element_index) {
+    BGPMessage message;
+    message.type = message_type;
+
+    message.record_type = record_type_from_bgpstream(record.type);
+    message.record_status = record_status_from_bgpstream(record.status);
+    message.timestamp = static_cast<std::time_t>(record.time_sec);
+    message.timestamp_microseconds = record.time_usec;
+    message.project_name = record_source_name(record.project_name, config.project);
+    message.collector_name = record_source_name(record.collector_name, config.collector);
+    message.router_name = record.router_name;
+    message.router_ip = address_to_string(record.router_ip);
+    message.dump_position = dump_position_from_bgpstream(record.dump_pos);
+    message.dump_timestamp = static_cast<std::time_t>(record.dump_time_sec);
+    message.source_file = source_file;
+    message.record_index = record_index;
+    message.element_index = element_index;
+
+    message.originated_timestamp = static_cast<std::time_t>(elem.orig_time_sec);
+    message.originated_timestamp_microseconds = elem.orig_time_usec;
+    message.peer_ip = address_to_string(elem.peer_ip);
+    message.peer_asn = elem.peer_asn;
+    message.annotations.rpki_active = elem.annotations.rpki_active != 0;
+    message.annotations.has_rpki_config = elem.annotations.cfg != nullptr;
+    message.annotations.timestamp = elem.annotations.timestamp;
+
+    if (message_has_prefix(message.type)) {
+        message.prefix = prefix_to_string(elem.prefix);
+    }
+
+    if (message_has_path_attributes(message.type)) {
+        message.next_hop = address_to_string(elem.nexthop);
+        append_as_path(elem.as_path, &message);
+        append_communities(elem.communities, &message);
+
+        if (elem.has_origin != 0) {
+            message.origin = origin_from_bgpstream(elem.origin);
+        }
+        if (elem.has_med != 0) {
+            message.med = elem.med;
+        }
+        if (elem.has_local_pref != 0) {
+            message.local_pref = elem.local_pref;
+        }
+        message.atomic_aggregate = elem.atomic_aggregate != 0;
+        if (elem.aggregator.has_aggregator != 0) {
+            message.aggregator = BGPAggregator{elem.aggregator.aggregator_asn,
+                                               address_to_string(elem.aggregator.aggregator_addr)};
         }
     }
+
+    if (message.type == BGPMessageType::PeerState) {
+        message.old_peer_state = peer_state_from_bgpstream(elem.old_state);
+        message.new_peer_state = peer_state_from_bgpstream(elem.new_state);
+    }
+
+    return message;
 }
 
 std::string format_parse_failure(const std::filesystem::path &file_path, const std::string &reason) {
@@ -238,8 +501,11 @@ void ChunkEngine::print_summary(std::ostream &out, const RangeProcessingStats &s
     out << "processed_chunks: " << stats.chunk_count << '\n';
     out << "files_used: " << stats.files_used << '\n';
     out << "visited_messages: " << stats.visited_messages << '\n';
+    out << "rib_messages: " << stats.rib_messages << '\n';
     out << "announcement_messages: " << stats.announcement_messages << '\n';
     out << "withdrawal_messages: " << stats.withdrawal_messages << '\n';
+    out << "peer_state_messages: " << stats.peer_state_messages << '\n';
+    out << "end_of_rib_messages: " << stats.end_of_rib_messages << '\n';
     out << "skipped_parse_files: " << stats.skipped_parse_files << '\n';
     out << "============================= plugin output =============================" << '\n';
     processor_.print_summary(out);
@@ -382,6 +648,7 @@ ChunkEngine::FileTraversalStats ChunkEngine::traverse_single_file(const std::fil
         FileTraversalStats stats;
         std::vector<BGPMessage> message_batch;
         message_batch.reserve(static_cast<std::size_t>(config_.message_batch_size));
+        const std::string source_file = normalized_path_text(file_path);
 
         auto flush_batch = [&]() {
             if (message_batch.empty()) {
@@ -393,6 +660,7 @@ ChunkEngine::FileTraversalStats ChunkEngine::traverse_single_file(const std::fil
         };
 
         bgpstream_record_t *record = nullptr;
+        std::uint64_t record_index = 0;
         while (true) {
             const int record_rc = bgpstream_get_next_record(stream, &record);
             if (record_rc == 0) {
@@ -404,6 +672,7 @@ ChunkEngine::FileTraversalStats ChunkEngine::traverse_single_file(const std::fil
             if (record == nullptr) {
                 continue;
             }
+            const std::uint64_t current_record_index = record_index++;
 
             switch (record->status) {
                 case BGPSTREAM_RECORD_STATUS_VALID_RECORD:
@@ -417,6 +686,7 @@ ChunkEngine::FileTraversalStats ChunkEngine::traverse_single_file(const std::fil
             }
 
             bgpstream_elem_t *elem = nullptr;
+            std::uint64_t element_index = 0;
             while (true) {
                 const int elem_rc = bgpstream_record_get_next_elem(record, &elem);
                 if (elem_rc == 0) {
@@ -428,17 +698,11 @@ ChunkEngine::FileTraversalStats ChunkEngine::traverse_single_file(const std::fil
                 if (elem == nullptr) {
                     continue;
                 }
+                const std::uint64_t current_element_index = element_index++;
 
-                BGPMessageType message_type;
-                switch (elem->type) {
-                    case BGPSTREAM_ELEM_TYPE_ANNOUNCEMENT:
-                        message_type = BGPMessageType::Announcement;
-                        break;
-                    case BGPSTREAM_ELEM_TYPE_WITHDRAWAL:
-                        message_type = BGPMessageType::Withdrawal;
-                        break;
-                    default:
-                        continue;
+                const std::optional<BGPMessageType> message_type = message_type_from_bgpstream(elem->type);
+                if (!message_type.has_value()) {
+                    continue;
                 }
 
                 const std::time_t timestamp = static_cast<std::time_t>(record->time_sec);
@@ -446,15 +710,26 @@ ChunkEngine::FileTraversalStats ChunkEngine::traverse_single_file(const std::fil
                     continue;
                 }
 
-                BGPMessage message;
-                message.type = message_type;
-                message.timestamp = timestamp;
-                message.prefix = prefix_to_string(elem->prefix);
-                if (message.type == BGPMessageType::Announcement) {
-                    append_asns_from_path(elem->as_path, &message.asns);
-                    stats.announcement_messages += 1;
-                } else {
-                    stats.withdrawal_messages += 1;
+                BGPMessage message = make_bgp_message(*record, *elem, *message_type, config_, source_file,
+                                                      current_record_index, current_element_index);
+                switch (message.type) {
+                    case BGPMessageType::RIB:
+                        stats.rib_messages += 1;
+                        break;
+                    case BGPMessageType::Announcement:
+                        stats.announcement_messages += 1;
+                        break;
+                    case BGPMessageType::Withdrawal:
+                        stats.withdrawal_messages += 1;
+                        break;
+                    case BGPMessageType::PeerState:
+                        stats.peer_state_messages += 1;
+                        break;
+                    case BGPMessageType::EndOfRib:
+                        stats.end_of_rib_messages += 1;
+                        break;
+                    case BGPMessageType::Unknown:
+                        break;
                 }
                 stats.visited_messages += 1;
 
@@ -488,8 +763,11 @@ void ChunkEngine::record_processed_file(const FileTraversalStats &file_stats) {
     std::lock_guard<std::mutex> lock(stats_mutex_);
     stats_.files_used += 1;
     stats_.visited_messages += file_stats.visited_messages;
+    stats_.rib_messages += file_stats.rib_messages;
     stats_.announcement_messages += file_stats.announcement_messages;
     stats_.withdrawal_messages += file_stats.withdrawal_messages;
+    stats_.peer_state_messages += file_stats.peer_state_messages;
+    stats_.end_of_rib_messages += file_stats.end_of_rib_messages;
 }
 
 void ChunkEngine::record_skipped_parse_file() {

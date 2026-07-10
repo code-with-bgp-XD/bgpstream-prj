@@ -24,7 +24,7 @@
    - 先检查这些文件是否已经缓存到本地；如果都在，就直接跳过远端下载。
    - 如果有缺失文件，会先基于当前 dry-run 能拿到的大小信息做缓存预算；当能估算出“当前缓存大小 + 本次预计新增下载字节”超出 `max_cache_size_gb` 时，会按“最旧文件优先”删除旧缓存。如果即使删掉可淘汰文件也放不下当前分片，会直接报错退出。默认不会额外为 dry-run 做远端 `probe size`。
    - 实际下载当前缺失的分片文件。
-   - 使用 `bgpstream` 的 `singlefile` 接口遍历该分片所有文件中的 announcement / withdrawal。
+   - 使用 `bgpstream` 的 `singlefile` 接口遍历该分片所有文件中的可用 BGP 元素。
    - 中层把报文组装成 `std::vector<BGPMessage>` 批量交给处理器。
    - 输出一次当前累计统计。
    - 保留已经下载的文件，作为后续实验的本地缓存。
@@ -126,6 +126,29 @@
   `cpp/src/config_file.cpp`
   负责解析根目录 JSON 配置文件，并把配置项填充到 `Config`。
 
+### BGPMessage 数据模型
+
+`BGPMessage` 现在保存 libBGPStream 公开 record/elem API 能提供的完整信息，而不再只保留类型、秒级时间、前缀和扁平 ASN 列表。字段按来源分为：
+
+- record 级信息：`record_type`、`record_status`、`timestamp`、`timestamp_microseconds`、`project_name`、`collector_name`、`router_name`、`router_ip`、`dump_position`、`dump_timestamp`、`source_file`、`record_index`、`element_index`。
+- elem 级来源信息：`type`、`originated_timestamp`、`originated_timestamp_microseconds`、`peer_ip`、`peer_asn`、`prefix`、`next_hop`。
+- AS 路径：规范化字符串 `as_path`、保留段类型和边界的 `as_path_segments`、可直接使用的 `origin_asn`。
+- BGP 路径属性：结构化 `communities`、`origin`、`med`、`local_pref`、`atomic_aggregate`、`aggregator`。
+- 状态与注解：`old_peer_state`、`new_peer_state`、`annotations`。
+
+`BGPMessageType` 支持 `RIB`、`Announcement`、`Withdrawal`、`PeerState` 和 `EndOfRib`。当前下载流程仍读取 update 文件，因此通常收到 announcement、withdrawal 和 peer-state；RIB 类型为以后接入 RIB 文件保留。`EndOfRib` 会在所用 libBGPStream 版本公开该元素类型时自动启用。
+
+兼容性和有效性约定：
+
+- 原有的 `type`、`timestamp`、`prefix`、`asns` 均保留；已有插件重新编译后通常不需要修改源码。
+- `asns` 仍是方便统计的扁平视图；需要区分 AS_SET、联盟序列和联盟集合时，应使用 `as_path_segments`。
+- `has_as_path` 和 `has_communities` 用于区分“属性不存在”和“属性存在但内容为空”。
+- `origin`、`med`、`local_pref`、`aggregator`、peer-state 字段使用 `std::optional` 表示 libBGPStream 是否提供了该值。
+- singlefile 接口把 project/collector 标成 `singlefile`；中层会用下载时的 `Config.project` 和 `Config.collector` 替换该占位值，同时用 `source_file` 保留实际本地文件来源。
+- `record_index` 是 record 在 `source_file` 中的零基序号，`element_index` 是 elem 在该 record 中的零基序号；插件可用三者可靠地重新归组同一底层 BGP record 拆出的元素。
+
+这里的“完整”以 libBGPStream 公开的元素模型为边界。libBGPStream 已经把原始 MRT/BGP 报文拆成元素，并会展开 AS_SEQUENCE；未通过其公开 elem 字段暴露的原始字节、未知 path attribute、large/extended community 等无法从这一层恢复。`annotations.cfg` 是带有借用生命周期的不透明配置指针，因此不会传给插件；`has_rpki_config` 只安全地记录它是否存在。
+
 ### C++ 下载适配层
 
 - `cpp/include/bgpstream_runner/download_client.h`
@@ -144,7 +167,7 @@
   这是当前系统的核心中层。职责包括：
   - 按配置的分片大小和单位切片运行
   - 管理每个分片的下载、处理、清理生命周期
-  - 使用 `bgpstream` 逐文件遍历 announcement / withdrawal
+  - 使用 `bgpstream` 逐文件遍历 RIB / announcement / withdrawal / peer-state / End-of-RIB 元素
   - 把报文打包成批次后交给处理器
   - 输出分片级和全局累计统计
 
@@ -167,7 +190,7 @@
     输出处理器自己的统计结果。
 
 - `cpp/include/bgpstream_runner/processor_plugin_api.h`
-  处理器插件导出接口。自定义处理器只要实现 `MessageProcessor`，并导出固定名字的工厂函数，就可以被主程序动态加载。
+  处理器插件导出接口。自定义处理器只要实现 `MessageProcessor`，并用 `BGPSTREAM_RUNNER_EXPORT_PROCESSOR(...)` 导出固定名字的版本函数和工厂函数，就可以被主程序动态加载。
 
 - `cpp/include/bgpstream_runner/plugin_loader.h`
   `cpp/src/plugin_loader.cpp`
@@ -439,9 +462,14 @@ cp config.example.json config.json
 - `processed_chunks`
 - `files_used`
 - `visited_messages`
+- `rib_messages`
 - `announcement_messages`
 - `withdrawal_messages`
+- `peer_state_messages`
+- `end_of_rib_messages`
 - `skipped_parse_files`
+
+`visited_messages` 是上述五类元素计数之和；在当前只读取 update 文件的流程里，`rib_messages` 通常为 0。较旧的 libBGPStream 不产生 End-of-RIB 元素时，`end_of_rib_messages` 也会保持为 0。
 
 除此之外，处理器插件还会追加输出自己的业务统计字段，具体由 `print_summary()` 实现决定。
 
@@ -486,6 +514,8 @@ class MyProcessor : public bgpstream_runner::MessageProcessor {
 
 BGPSTREAM_RUNNER_EXPORT_PROCESSOR(MyProcessor)
 ```
+
+`BGPMessage` 是插件 ABI 的一部分。本次扩展后，旧的插件动态库必须用当前头文件重新编译；加载器会检查宏导出的 API 版本，并对未重编译或版本不一致的插件给出明确错误，而不是继续执行不兼容的二进制代码。
 
 对应的 `plugins/my_processor/CMakeLists.txt` 可以写成：
 

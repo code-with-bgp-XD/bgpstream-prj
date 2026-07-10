@@ -10,13 +10,12 @@ class ExampleOriginAsnProcessor : public bgpstream_runner::MessageProcessor {
 
     void handle_messages(const std::vector<bgpstream_runner::BGPMessage> &messages) override {
         for (const auto &message : messages) {
-            if (message.asns.empty()) {
+            if (message.type != bgpstream_runner::BGPMessageType::Announcement || !message.origin_asn.has_value()) {
                 continue;
             }
 
-            origin_asns_.insert(message.asns.back());
-            announcements_with_origin_ +=
-                static_cast<std::uint64_t>(message.type == bgpstream_runner::BGPMessageType::Announcement);
+            origin_asns_.insert(*message.origin_asn);
+            announcements_with_origin_ += 1;
         }
     }
 

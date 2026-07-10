@@ -150,6 +150,24 @@ LoadedProcessorPlugin::LoadedProcessorPlugin(const Config &config, std::string_v
     }
 
     dlerror();
+    auto *api_version = reinterpret_cast<ProcessorAPIVersionFn>(dlsym(handle_, kProcessorAPIVersionSymbol));
+    const char *api_version_error = dlerror();
+    if (api_version_error != nullptr || api_version == nullptr) {
+        close_handle();
+        throw std::runtime_error("Processor plugin " + plugin_path_.string() + " does not export '" +
+                                 std::string(kProcessorAPIVersionSymbol) +
+                                 "'. Rebuild it against the current bgpstream_runner SDK.");
+    }
+
+    const std::uint32_t loaded_api_version = api_version();
+    if (loaded_api_version != kProcessorPluginAPIVersion) {
+        close_handle();
+        throw std::runtime_error("Processor plugin " + plugin_path_.string() + " uses API version " +
+                                 std::to_string(loaded_api_version) + ", but this executable requires version " +
+                                 std::to_string(kProcessorPluginAPIVersion) + ". Rebuild the plugin.");
+    }
+
+    dlerror();
     auto *create_processor = reinterpret_cast<CreateProcessorFn>(dlsym(handle_, kCreateProcessorSymbol));
     const char *create_error = dlerror();
     if (create_error != nullptr || create_processor == nullptr) {

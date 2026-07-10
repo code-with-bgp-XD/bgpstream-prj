@@ -25,8 +25,11 @@ class ChunkEngine {
    private:
     struct FileTraversalStats {
         std::uint64_t visited_messages = 0;
+        std::uint64_t rib_messages = 0;
         std::uint64_t announcement_messages = 0;
         std::uint64_t withdrawal_messages = 0;
+        std::uint64_t peer_state_messages = 0;
+        std::uint64_t end_of_rib_messages = 0;
     };
 
     struct PlannedDownloadEstimate {
