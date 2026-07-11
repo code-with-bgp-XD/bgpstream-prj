@@ -1,14 +1,14 @@
 # BGPStream Chunk Runner
 
-这个项目的目标是基于 CAIDA `bgpstream` 和底层 `python/download.py`，对一个较长时间范围内的 BGP update 数据做“分段下载、分段处理、缓存复用”，从而避免一次性下载整段历史数据导致磁盘占用过大，同时减少重复实验时的重复下载成本。
+这个项目基于 CAIDA `libBGPStream`，使用 Linux C++17 对较长时间范围内的 BGP update 数据做“分段下载、分段处理、缓存复用”，从而避免一次性下载整段历史数据导致磁盘占用过大，并减少重复实验时的重复下载成本。下载和处理均在同一个 C++ 进程内完成，运行时不依赖 Python。
 
 当前架构分成两层：
 
-1. Python 下载层
-   固定使用 `python/download.py` 负责远端资源发现、断点续传、重试和文件落盘。
+1. C++ 下载层
+   使用 `libcurl` 负责远端资源发现、HTTPS 下载、断点续传、并发、重试和文件落盘。Route Views collector 直接使用官方归档地址，其他 collector 通过 CAIDA Broker API 发现资源。
 
 2. C++ 处理中层 + 处理器插件
-   C++ 中层负责按配置切片、调用下载脚本、遍历 MRT 文件里的 BGP 报文、把报文批量传给上层处理器。
+   C++ 中层负责按配置切片、调用原生下载层、遍历 MRT 文件里的 BGP 报文、把报文批量传给上层处理器。
    具体“怎么处理一批报文”由 `MessageProcessor` 插件决定，主程序在运行时动态加载处理器库。
 
 ---
@@ -20,10 +20,10 @@
 1. 程序启动时会强制读取仓库根目录的 `config.json`；如果文件不存在，会直接报错退出。仓库里提交的是 `config.example.json` 模板。读取完配置后，再用命令行参数覆盖同名字段，最终构造 `Config`。
 2. 按 `chunk_size + chunk_unit` 把 `start_date ~ end_date` 切成多个 `ClosedDateRange`。
 3. 对每个分片：
-   - 用 `python/download.py --dry-run` 发现该分片需要的 update 文件。
+   - 在 C++ 内发现该分片需要的 update 文件：`route-views*` collector 直接生成 Route Views 归档 URL，其他 collector 查询 CAIDA Broker API。
    - 先检查这些文件是否已经缓存到本地；如果都在，就直接跳过远端下载。
-   - 如果有缺失文件，会先基于当前 dry-run 能拿到的大小信息做缓存预算；当能估算出“当前缓存大小 + 本次预计新增下载字节”超出 `max_cache_size_gb` 时，会按“最旧文件优先”删除旧缓存。如果即使删掉可淘汰文件也放不下当前分片，会直接报错退出。默认不会额外为 dry-run 做远端 `probe size`。
-   - 实际下载当前缺失的分片文件。
+   - 如果有缺失文件，会先基于资源发现阶段已知的大小信息做缓存预算；当能估算出“当前缓存大小 + 本次预计新增下载字节”超出 `max_cache_size_gb` 时，会按“最旧文件优先”删除旧缓存。如果即使删掉可淘汰文件也放不下当前分片，会直接报错退出。资源发现阶段默认不额外发送 HEAD 请求，因此大小未知时会只依据当前缓存量决策。
+   - 用 `libcurl` 并发下载当前缺失的文件；数据先写入 `.part`，服务器支持 Range 时会从已有分片继续，成功校验大小后再原子改名为最终文件。单轮失败会进行 3 轮指数退避重试。
    - 使用 `bgpstream` 的 `singlefile` 接口遍历该分片所有文件中的可用 BGP 元素。
    - 中层把报文组装成 `std::vector<BGPMessage>` 批量交给处理器。
    - 输出一次当前累计统计。
@@ -43,13 +43,6 @@
 ├── config.example.json
 ├── .clangd
 ├── examples/                      # 仓库内置示例插件
-├── plugins/                       # 受 Git 跟踪的持久插件目录
-│   └── count_prefix_freq/         # 一个插件一个子目录
-│       ├── CMakeLists.txt
-│       ├── count_prefix_freq.cpp
-│       └── render_prefix_frequency_report.py
-├── python/
-│   ├── download.py
 └── cpp/
     ├── include/bgpstream_runner/
     │   ├── types.h
@@ -94,15 +87,6 @@
   - 日志开关
   - 下载条目限制
 
-### Python 下载层
-
-- `python/download.py`
-  底层下载器。负责：
-  - 查询可下载资源列表
-  - 输出 dry-run 结果
-  - 下载 update 文件
-  - 处理断点续传、重试和进度显示
-
 ### C++ 公共类型与工具
 
 - `cpp/include/bgpstream_runner/types.h`
@@ -118,7 +102,6 @@
   放通用工具逻辑，包括：
   - 参数解析
   - 时间范围切片
-  - shell 命令执行
   - 文件大小统计
   - 进度条显示
 
@@ -149,16 +132,16 @@
 
 这里的“完整”以 libBGPStream 公开的元素模型为边界。libBGPStream 已经把原始 MRT/BGP 报文拆成元素，并会展开 AS_SEQUENCE；未通过其公开 elem 字段暴露的原始字节、未知 path attribute、large/extended community 等无法从这一层恢复。`annotations.cfg` 是带有借用生命周期的不透明配置指针，因此不会传给插件；`has_rpki_config` 只安全地记录它是否存在。
 
-### C++ 下载适配层
+### C++ 原生下载层
 
 - `cpp/include/bgpstream_runner/download_client.h`
   `cpp/src/download_client.cpp`
-  这是 C++ 对 `python/download.py` 的适配层。
-  它不直接实现下载，而是负责：
-  - 组装 `download.py` 命令行
-  - 执行 dry-run，收集目标文件列表
-  - 执行实际下载
-  - 自动定位 `python/download.py` 路径
+  完整实现资源发现和下载，不启动任何外部脚本或子进程。职责包括：
+  - 生成 Route Views 归档 URL，或调用 CAIDA Broker API 并解析 JSON 资源清单
+  - 使用 `libcurl` 完成 HTTPS、重定向、代理、TLS 证书校验和超时控制
+  - 按 `download_workers` 创建并发下载线程
+  - 用 `.part` 文件处理断点续传、远端大小校验和最终原子改名
+  - 对失败文件执行指数退避重试，并输出可操作的错误提示
 
 ### C++ 中层引擎
 
@@ -210,11 +193,7 @@
 
 ### 持久插件
 
-- `plugins/CMakeLists.txt`
-  自动扫描 `plugins/<plugin_name>/CMakeLists.txt`，把每个子目录当作一个独立插件接入构建。
-
-- `plugins/count_prefix_freq/`
-  当前仓库里一个受版本控制的持久插件示例。它统计各前缀出现频次，并在处理结束后生成 CSV、JSON 和 SVG 统计图。
+需要长期维护的自定义插件可以放在 `plugins/<plugin_name>/`。当 `plugins/CMakeLists.txt` 存在时，根构建会自动接入该目录；仓库内置的可运行示例位于 `examples/`。
 
 ### 主入口
 
@@ -234,7 +213,7 @@
 这样拆分的核心好处是：
 
 - 下载逻辑和处理逻辑解耦
-  `download.py` 不需要知道上层怎么统计，C++ 处理器也不需要知道底层怎么下载。
+  原生 `DownloadClient` 不需要知道上层怎么统计，C++ 处理器也不需要知道底层怎么下载。
 
 - 中层稳定、上层可扩展
   如果以后你要做别的统计，只需要单独写一个新的 `MessageProcessor` 插件，不需要改下载流程、分片控制逻辑，也不需要改 `main.cpp`。
@@ -251,8 +230,73 @@
 
 - 所有处理器插件都通过 `bgpstream_add_processor_plugin(...)` 注册到构建系统。
 - 构建完成后，主程序会读取 `build/bgpstream_processor_plugins.tsv` 来发现可用插件。
-- 当前仓库默认会同时注册 `examples/` 和 `plugins/` 里的多个插件，因此通常需要在根目录 `config.json` 的 `processor_plugin` 字段里显式指定插件名。
+- 当前仓库会注册 `examples/` 里的多个插件；如果添加了 `plugins/`，也会一并注册。因此通常需要在根目录 `config.json` 的 `processor_plugin` 字段里显式指定插件名。
 - 也可以用 `--processor-plugin NAME_OR_PATH` 临时覆盖根目录 `config.json` 里的同名字段。
+
+---
+
+## Linux 依赖安装
+
+项目的直接构建依赖如下：
+
+- 支持 C++17 的 GCC 或 Clang
+- CMake 3.16 或更高版本
+- `libcurl` 开发头文件和库：原生 HTTP/HTTPS 下载
+- `ncurses` 开发头文件和库：终端进度显示
+- CAIDA `libBGPStream` 开发头文件和库：MRT/BGP 解析
+- POSIX Threads 和 `dl`：由常见 Linux C/C++ 工具链提供
+
+Ubuntu / Debian 推荐按以下步骤安装。先安装本项目自身和添加软件源所需的系统包：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  build-essential cmake curl wget ca-certificates gnupg lsb-release \
+  libcurl4-openssl-dev libncurses-dev
+```
+
+`libcurl4-gnutls-dev` 也可以替代 `libcurl4-openssl-dev`，二者选择其一即可。
+
+然后按 CAIDA 官方方式添加 Wandio 和 CAIDA 软件源并安装 `libBGPStream`：
+
+```bash
+curl -1sLf 'https://dl.cloudsmith.io/public/wand/libwandio/cfg/setup/bash.deb.sh' | sudo -E bash
+
+echo "deb https://pkg.caida.org/os/$(lsb_release -si | awk '{print tolower($0)}') $(lsb_release -sc) main" \
+  | sudo tee /etc/apt/sources.list.d/caida.list
+sudo wget -O /etc/apt/trusted.gpg.d/caida.gpg \
+  https://pkg.caida.org/os/ubuntu/keyring.gpg
+
+sudo apt-get update
+sudo apt-get install -y bgpstream
+```
+
+CAIDA 的完整安装说明见 [Installing libBGPStream](https://bgpstream.caida.org/docs/install/bgpstream)。如果发行版没有可用二进制包，应按该页面先构建 Wandio，再构建 `libBGPStream`。
+
+Fedora / RHEL 系列可先安装本项目和 `libBGPStream` 源码构建所需的基础包：
+
+```bash
+sudo dnf install -y \
+  gcc gcc-c++ make cmake curl-devel ncurses-devel \
+  zlib-devel bzip2-devel librdkafka-devel
+```
+
+安装完成后可检查 CMake 所需的头文件和动态库是否可见：
+
+```bash
+test -r /usr/include/bgpstream.h
+ldconfig -p | grep -E 'libbgpstream|libcurl|libncurses'
+```
+
+如果 `libBGPStream` 安装在非标准目录，可以在配置时显式指定：
+
+```bash
+cmake -S . -B build \
+  -DBGPSTREAM_INCLUDE_DIR=/opt/bgpstream/include \
+  -DBGPSTREAM_LIBRARY=/opt/bgpstream/lib/libbgpstream.so
+```
+
+不需要安装 Python、pip 或任何 Python 包。
 
 ---
 
@@ -289,9 +333,9 @@ cmake --build build
 - 当前处理器的业务统计结果
   具体字段取决于你当前加载的本地插件实现。
 
-缓存目录默认是 `output_dir`。程序不会在每个分片结束后删除缓存文件；如果当前分片需要下载新文件，程序会在下载前尽量评估“当前缓存 + 本次预计新增下载字节”是否超过 `max_cache_size_gb`。超限时会按“最旧文件优先”淘汰旧缓存；如果当前分片本身就无法放进缓存上限，也会直接报错。默认不会额外为 dry-run 做远端 `probe size`，所以在大小未知时，清理判断会退化成只基于当前缓存大小。
+缓存目录默认是 `output_dir`。程序不会在每个分片结束后删除缓存文件；如果当前分片需要下载新文件，程序会在下载前尽量评估“当前缓存 + 本次预计新增下载字节”是否超过 `max_cache_size_gb`。超限时会按“最旧文件优先”淘汰旧缓存；如果当前分片本身就无法放进缓存上限，也会直接报错。资源发现阶段不会为了缓存预算逐文件探测远端大小，所以在大小未知时，清理判断会退化成只基于当前缓存大小。
 
-根目录下的 [manage.sh](/home/fishtofu/bgpstream/manage.sh) 可以统一执行构建和缓存管理：
+根目录下的 `manage.sh` 可以统一执行构建和缓存管理：
 
 ```bash
 ./manage.sh build
@@ -402,10 +446,10 @@ cp config.example.json config.json
   统计结束日期，格式为 `YYYY-MM-DD`。这是“包含式”的结束日期，程序内部会自动扩展到下一天的 `00:00:00 UTC` 作为结束边界。
 
 - `project`
-  传给 `python/download.py` 的 BGP 项目标识，例如 `routeviews`。
+  BGP 项目标识，例如 `routeviews` 或 `ris`。使用 Broker API 时它会作为资源过滤条件；Route Views 直连模式下本地目录固定归一为 `routeviews`。
 
 - `collector`
-  传给 `python/download.py` 的 collector 名称，例如 `route-views.sg`。
+  collector 名称，例如 `route-views.sg` 或 `rrc00`。名称以 `route-views` 开头时使用 Route Views 官方归档，其余名称通过 CAIDA Broker API 发现资源。
 
 - `processor_plugin`
   处理器插件选择器。可以填写插件名，也可以填写动态库路径。
@@ -543,27 +587,8 @@ bgpstream_add_processor_plugin(
 这样每个插件都有独立的目录，可以自行放置：
 
 - C++ 源文件
-- Python 收尾脚本
 - 插件自己的 `CMakeLists.txt`
 - 插件专用的 README、模板、辅助文件
-
-例如当前的持久插件就是：
-
-- `plugins/count_prefix_freq/CMakeLists.txt`
-- `plugins/count_prefix_freq/count_prefix_freq.cpp`
-- `plugins/count_prefix_freq/render_prefix_frequency_report.py`
-
-它对应的 `processor_plugin` 取值是：
-
-- `count_prefix_freq_plugin`
-
-根目录 `config.json` 里可以直接这样写：
-
-```json
-{
-  "processor_plugin": "count_prefix_freq_plugin"
-}
-```
 
 仓库当前附带的示例插件还有：
 

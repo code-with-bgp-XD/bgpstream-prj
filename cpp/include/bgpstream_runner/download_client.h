@@ -21,11 +21,7 @@ class DownloadClient {
     void download_range(const ClosedDateRange &range, int limit_override) const;
 
    private:
-    std::string build_download_command(const ClosedDateRange &range, bool dry_run, int limit_override,
-                                       bool probe_size = false) const;
     int resolve_limit(int limit_override) const;
-    std::string download_script_path() const;
-    std::string python_executable() const;
 
     Config config_;
 };

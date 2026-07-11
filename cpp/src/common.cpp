@@ -1,7 +1,6 @@
 #include "bgpstream_runner/common.h"
 
 #include <curses.h>
-#include <sys/wait.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -12,6 +11,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
+#include <utility>
 
 #include "bgpstream_runner/config_file.h"
 
@@ -70,23 +70,13 @@ std::filesystem::path repo_config_path() {
     return std::filesystem::path(BGPSTREAM_SOURCE_DIR) / kDefaultConfigPath;
 }
 
-int decode_exit_code(int status) {
-    if (status == -1) {
-        return -1;
-    }
-    if (WIFEXITED(status)) {
-        return WEXITSTATUS(status);
-    }
-    if (WIFSIGNALED(status)) {
-        return 128 + WTERMSIG(status);
-    }
-    return status;
-}
-
 }  // namespace
 
-FileProgressDisplay::FileProgressDisplay(std::size_t total_files, std::uint64_t total_bytes)
-    : total_files_(total_files), total_bytes_(total_bytes), started_at_(std::chrono::steady_clock::now()) {
+FileProgressDisplay::FileProgressDisplay(std::size_t total_files, std::uint64_t total_bytes, std::string phase)
+    : total_files_(total_files),
+      total_bytes_(total_bytes),
+      phase_(std::move(phase)),
+      started_at_(std::chrono::steady_clock::now()) {
     const char *term = std::getenv("TERM");
     use_curses_ = (::isatty(STDOUT_FILENO) == 1 && term != nullptr && std::string_view(term) != "dumb");
 
@@ -123,13 +113,14 @@ void FileProgressDisplay::close() {
 
 std::string FileProgressDisplay::build_line_locked() const {
     static constexpr std::size_t kBarWidth = 36;
-    const double fraction = total_files_ == 0 ? 1.0 : static_cast<double>(completed_files_) / total_files_;
+    const double fraction =
+        total_files_ == 0 ? 1.0 : static_cast<double>(completed_files_) / static_cast<double>(total_files_);
     const std::size_t filled = static_cast<std::size_t>(fraction * static_cast<double>(kBarWidth));
     const auto elapsed =
         std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - started_at_);
 
     std::ostringstream output;
-    output << "process [";
+    output << phase_ << " [";
     for (std::size_t index = 0; index < kBarWidth; ++index) {
         if (index < filled) {
             output << '=';
@@ -140,8 +131,11 @@ std::string FileProgressDisplay::build_line_locked() const {
         }
     }
     output << "] " << std::fixed << std::setprecision(1) << (fraction * 100.0) << "% " << completed_files_ << "/"
-           << total_files_ << " files " << format_bytes(completed_bytes_) << "/" << format_bytes(total_bytes_)
-           << " elapsed=" << format_elapsed(elapsed);
+           << total_files_ << " files " << format_bytes(completed_bytes_);
+    if (total_bytes_ > 0) {
+        output << "/" << format_bytes(total_bytes_);
+    }
+    output << " elapsed=" << format_elapsed(elapsed);
     return output.str();
 }
 
@@ -363,41 +357,6 @@ std::uint64_t total_file_bytes(const std::vector<std::filesystem::path> &files) 
     }
     return total_bytes;
 }
-
-std::string shell_escape(std::string_view value) {
-    std::string escaped = "'";
-    for (char ch : value) {
-        if (ch == '\'') {
-            escaped += "'\\''";
-        } else {
-            escaped.push_back(ch);
-        }
-    }
-    escaped.push_back('\'');
-    return escaped;
-}
-
-CommandResult run_capture_command(const std::string &command) {
-    const std::string redirected_command = command + " 2>&1";
-    FILE *pipe = popen(redirected_command.c_str(), "r");
-    if (pipe == nullptr) {
-        throw std::runtime_error("Failed to execute command: " + command);
-    }
-
-    std::string output;
-    char buffer[4096];
-    while (std::fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-        output += buffer;
-    }
-
-    const int status = pclose(pipe);
-    CommandResult result;
-    result.exit_code = decode_exit_code(status);
-    result.output = std::move(output);
-    return result;
-}
-
-int run_streaming_command(const std::string &command) { return decode_exit_code(std::system(command.c_str())); }
 
 ClosedDateRange parse_closed_date_range(const Config &config) {
     const std::time_t start = parse_utc_date(config.start_date);

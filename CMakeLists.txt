@@ -22,6 +22,7 @@ foreach(config ${CMAKE_CONFIGURATION_TYPES})
 endforeach()
 
 find_package(Curses REQUIRED)
+find_package(CURL REQUIRED)
 find_package(Threads REQUIRED)
 find_path(BGPSTREAM_INCLUDE_DIR NAMES bgpstream.h REQUIRED)
 find_library(BGPSTREAM_LIBRARY NAMES bgpstream REQUIRED)
@@ -55,7 +56,6 @@ target_compile_definitions(
   bgpstream_runner_core
   PRIVATE
     BGPSTREAM_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
-    BGPSTREAM_DOWNLOAD_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/python/download.py"
 )
 
 target_link_libraries(
@@ -64,6 +64,7 @@ target_link_libraries(
     bgpstream_runner_sdk
   PRIVATE
     ${BGPSTREAM_LIBRARY}
+    CURL::libcurl
     ${CURSES_LIBRARIES}
     Threads::Threads
 )
