@@ -185,7 +185,6 @@ void FileProgressDisplay::close_locked() {
            << "  --project NAME\n"
            << "  --collector NAME\n"
            << "  --processor-plugin NAME_OR_PATH\n"
-           << "  --output-dir PATH\n"
            << "  --download-workers N\n"
            << "  --parser-workers N\n"
            << "  --message-batch-size N\n"
@@ -196,6 +195,7 @@ void FileProgressDisplay::close_locked() {
            << "  --log-chunk-summary true|false\n"
            << "  --log-final-summary true|false\n"
            << "  --limit N\n"
+           << "  --download-only\n"
            << "  --help\n";
     std::exit(exit_code);
 }
@@ -203,10 +203,27 @@ void FileProgressDisplay::close_locked() {
 Config parse_args(int argc, char **argv) {
     Config config;
     const std::filesystem::path config_file = repo_config_path();
+    bool download_only_requested = false;
+    for (int index = 1; index < argc; ++index) {
+        if (std::string_view(argv[index]) == "--download-only") {
+            download_only_requested = true;
+            break;
+        }
+    }
+
     if (!std::filesystem::exists(config_file)) {
         throw std::runtime_error("Required config file does not exist: " + config_file.string());
     }
     apply_json_config_file(config_file, &config);
+
+    if (download_only_requested) {
+        config.start_date = config.cache.start_date;
+        config.end_date = config.cache.end_date;
+        config.project = config.cache.project;
+        config.collector = config.cache.collector;
+        config.limit = config.cache.limit;
+        config.download_only = true;
+    }
 
     for (int index = 1; index < argc; ++index) {
         const std::string arg = argv[index];
@@ -227,8 +244,6 @@ Config parse_args(int argc, char **argv) {
             config.collector = require_value("--collector");
         } else if (arg == "--processor-plugin") {
             config.processor_plugin = require_value("--processor-plugin");
-        } else if (arg == "--output-dir") {
-            config.output_dir = require_value("--output-dir");
         } else if (arg == "--download-workers") {
             config.download_workers = std::stoi(require_value("--download-workers"));
         } else if (arg == "--parser-workers") {
@@ -277,6 +292,8 @@ Config parse_args(int argc, char **argv) {
             }
         } else if (arg == "--limit") {
             config.limit = std::stoi(require_value("--limit"));
+        } else if (arg == "--download-only") {
+            config.download_only = true;
         } else if (arg == "--help" || arg == "-h") {
             print_usage_and_exit(argv[0], 0);
         } else {

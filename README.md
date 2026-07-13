@@ -17,7 +17,7 @@
 
 整体流程如下：
 
-1. 程序启动时会强制读取仓库根目录的 `config.json`；如果文件不存在，会直接报错退出。仓库里提交的是 `config.example.json` 模板。读取完配置后，再用命令行参数覆盖同名字段，最终构造 `Config`。
+1. 程序启动时会强制读取仓库根目录的 `config.json`；如果文件不存在，会直接报错退出。配置分为 `analysis`（数据分析）和 `cache`（数据预下载）两个顶层区块。仓库里提交的是 `config.example.json` 模板。读取完配置后，再用命令行参数覆盖当前运行模式的同名字段，最终构造 `Config`。
 2. 按 `chunk_size + chunk_unit` 把 `start_date ~ end_date` 切成多个 `ClosedDateRange`。
 3. 对每个分片：
    - 在 C++ 内发现该分片需要的 update 文件：`route-views*` collector 直接生成 Route Views 归档 URL，其他 collector 查询 CAIDA Broker API。
@@ -86,6 +86,7 @@
   - 批量处理大小
   - 日志开关
   - 下载条目限制
+  - 固定缓存目录和独立预下载范围
 
 ### C++ 公共类型与工具
 
@@ -139,7 +140,7 @@
   完整实现资源发现和下载，不启动任何外部脚本或子进程。职责包括：
   - 生成 Route Views 归档 URL，或调用 CAIDA Broker API 并解析 JSON 资源清单
   - 使用 `libcurl` 完成 HTTPS、重定向、代理、TLS 证书校验和超时控制
-  - 按 `download_workers` 创建并发下载线程
+  - 按 `cache.download_workers` 创建并发下载线程
   - 用 `.part` 文件处理断点续传、远端大小校验和最终原子改名
   - 对失败文件执行指数退避重试，并输出可操作的错误提示
 
@@ -189,7 +190,7 @@
 - `examples/example_announcement_counter_plugin.cpp`
 - `examples/example_withdrawal_prefix_plugin.cpp`
 - `examples/example_origin_asn_plugin.cpp`
-  这些文件提供了几个体量很小的示例处理器，便于参考实现方式，也可以直接通过根目录 `config.json` 的 `processor_plugin` 字段切换使用。
+  这些文件提供了几个体量很小的示例处理器，便于参考实现方式，也可以直接通过根目录 `config.json` 的 `analysis.processor_plugin` 字段切换使用。
 
 ### 持久插件
 
@@ -230,8 +231,8 @@
 
 - 所有处理器插件都通过 `bgpstream_add_processor_plugin(...)` 注册到构建系统。
 - 构建完成后，主程序会读取 `build/bgpstream_processor_plugins.tsv` 来发现可用插件。
-- 当前仓库会注册 `examples/` 里的多个插件；如果添加了 `plugins/`，也会一并注册。因此通常需要在根目录 `config.json` 的 `processor_plugin` 字段里显式指定插件名。
-- 也可以用 `--processor-plugin NAME_OR_PATH` 临时覆盖根目录 `config.json` 里的同名字段。
+- 当前仓库会注册 `examples/` 里的多个插件；如果添加了 `plugins/`，也会一并注册。因此通常需要在根目录 `config.json` 的 `analysis.processor_plugin` 字段里显式指定插件名。
+- 也可以用 `--processor-plugin NAME_OR_PATH` 临时覆盖根目录 `config.json` 里的 `analysis.processor_plugin`。
 
 ---
 
@@ -333,13 +334,14 @@ cmake --build build
 - 当前处理器的业务统计结果
   具体字段取决于你当前加载的本地插件实现。
 
-缓存目录默认是 `output_dir`。程序不会在每个分片结束后删除缓存文件；如果当前分片需要下载新文件，程序会在下载前尽量评估“当前缓存 + 本次预计新增下载字节”是否超过 `max_cache_size_gb`。超限时会按“最旧文件优先”淘汰旧缓存；如果当前分片本身就无法放进缓存上限，也会直接报错。资源发现阶段不会为了缓存预算逐文件探测远端大小，所以在大小未知时，清理判断会退化成只基于当前缓存大小。
+缓存目录固定为 `cache.output_dir`，预下载和分析共用。程序不会在每个分片结束后删除缓存文件；如果分析阶段发现当前分片仍需下载新文件，会在下载前尽量评估“当前缓存 + 本次预计新增下载字节”是否超过 `analysis.max_cache_size_gb`。超限时会按“最旧文件优先”淘汰旧缓存；如果当前分片本身就无法放进缓存上限，也会直接报错。资源发现阶段不会为了缓存预算逐文件探测远端大小，所以在大小未知时，清理判断会退化成只基于当前缓存大小。
 
 根目录下的 `manage.sh` 可以统一执行构建和缓存管理：
 
 ```bash
 ./manage.sh build
 ./manage.sh run
+./manage.sh download
 ./manage.sh cache-size
 ./manage.sh cache-clear
 ```
@@ -350,12 +352,28 @@ cmake --build build
   等价于执行 `cmake -S . -B build && cmake --build build`。
 - `run`
   先执行一次构建，再启动 `build/bgpstream_analyzer`。
+- `download`
+  先构建项目，再按 `config.json` 的 `cache` 区块把指定 `project + collector` 和日期范围内的 update 文件下载到固定缓存目录；只下载数据，不加载处理器插件，也不执行数据分析。已经完整缓存的文件会直接复用。网络中断或进程停止后会保留 `.part`，再次运行时使用 HTTP Range 从已有字节继续；只有确认分片损坏、无法续传时才删除重下。结束日期为包含式。
 - `cache-size`
-  读取根目录 `config.json` 里的 `output_dir`，统计当前缓存文件数量和总大小。
+  读取根目录 `config.json` 里的 `cache.output_dir`，统计当前缓存文件数量和总大小。
 - `cache-clear`
-  读取根目录 `config.json` 里的 `output_dir`，删除全部缓存文件。
+  读取根目录 `config.json` 里的 `cache.output_dir`，删除全部缓存文件。
 
-缓存相关命令也支持 `--output-dir PATH` 临时覆盖；`build` 和 `run` 支持 `--build-dir PATH` 指定构建目录。
+`cache.output_dir` 是下载和分析共用的唯一缓存根目录：相对路径固定以仓库根目录为基准，`download` 命令不能临时覆盖该目录，分析程序也始终从这里查找数据。这样只要 `analysis.project + analysis.collector` 与已下载数据一致、分析日期位于已下载范围内，后续分析就会直接命中缓存。
+
+`build`、`run` 和 `download` 支持 `--build-dir PATH` 指定构建目录。`download` 还支持用命令行临时覆盖 `cache` 区块的数据源、日期、并发数和文件数限制，例如：
+
+```bash
+./manage.sh download \
+  --project ris \
+  --collector rrc00 \
+  --start-date 2025-11-01 \
+  --end-date 2025-11-07 \
+  --download-workers 8
+```
+
+`cache-size` 和 `cache-clear` 仍可使用 `--output-dir PATH` 检查或清理其他目录。预下载不会按 `analysis.max_cache_size_gb` 淘汰文件，因此应在下载前确认固定缓存目录有足够磁盘空间。
+
 如果需要给主程序透传参数，可以使用 `--`，例如：
 
 ```bash
@@ -366,7 +384,7 @@ cmake --build build
 
 ## 运行方式
 
-程序启动时会强制读取根目录下的 `config.json`。该文件已被 `.gitignore` 忽略，不会被 Git 追踪。仓库里保留一份 `config.example.json` 作为模板。如果命令行里传了同名参数，命令行参数优先。
+程序启动时会强制读取根目录下的 `config.json`。该文件已被 `.gitignore` 忽略，不会被 Git 追踪。仓库里保留一份 `config.example.json` 作为模板。配置必须包含 `analysis` 和 `cache` 两个顶层区块。如果命令行里传了当前运行模式的同名参数，命令行参数优先；缓存目录是例外，只能由 `cache.output_dir` 确定。
 
 建议先从模板创建本地配置：
 
@@ -378,22 +396,31 @@ cp config.example.json config.json
 
 ```json
 {
-  "start_date": "2025-01-01",
-  "end_date": "2026-01-01",
-  "project": "routeviews",
-  "collector": "route-views.sg",
-  "processor_plugin": "example_message_summary_plugin",
-  "output_dir": "bgpdata",
-  "download_workers": 32,
-  "parser_workers": 8,
-  "message_batch_size": 1048576,
-  "chunk_size": 1,
-  "chunk_unit": "day",
-  "max_cache_size_gb": 10,
-  "limit": -1,
-  "log_phase_transitions": true,
-  "log_chunk_summary": true,
-  "log_final_summary": true
+  "analysis": {
+    "start_date": "2025-01-01",
+    "end_date": "2026-01-01",
+    "project": "routeviews",
+    "collector": "route-views.sg",
+    "processor_plugin": "example_message_summary_plugin",
+    "parser_workers": 8,
+    "message_batch_size": 1048576,
+    "chunk_size": 1,
+    "chunk_unit": "day",
+    "max_cache_size_gb": 5.0,
+    "limit": -1,
+    "log_phase_transitions": true,
+    "log_chunk_summary": true,
+    "log_final_summary": true
+  },
+  "cache": {
+    "start_date": "2025-01-01",
+    "end_date": "2026-01-01",
+    "project": "routeviews",
+    "collector": "route-views.sg",
+    "output_dir": "bgpdata",
+    "download_workers": 32,
+    "limit": -1
+  }
 }
 ```
 
@@ -403,7 +430,6 @@ cp config.example.json config.json
 ./build/bgpstream_analyzer \
   --start-date 2025-11-01 \
   --end-date 2025-12-01 \
-  --download-workers 4 \
   --parser-workers 4 \
   --message-batch-size 1024
 ```
@@ -418,15 +444,13 @@ cp config.example.json config.json
 - `--chunk-unit day|month`
 - `--max-cache-size-gb N`
 
-当前 `config.json` 支持的主要字段：
+`analysis` 区块保留已有的数据分析配置：
 
 - `start_date`
 - `end_date`
 - `project`
 - `collector`
 - `processor_plugin`
-- `output_dir`
-- `download_workers`
 - `parser_workers`
 - `message_batch_size`
 - `chunk_size`
@@ -435,61 +459,70 @@ cp config.example.json config.json
 - `limit`
 - `log_phase_transitions`
 - `log_chunk_summary`
-- `log_final_summary`
+- `analysis.log_final_summary`
+
+`cache` 区块保存独立的数据预下载配置：
+
+- `start_date`
+- `end_date`
+- `project`
+- `collector`
+- `output_dir`
+- `download_workers`
+- `limit`
 
 各字段含义：
 
-- `start_date`
+- `analysis.start_date` / `cache.start_date`
   统计起始日期，格式为 `YYYY-MM-DD`。程序会从这一天的 `00:00:00 UTC` 开始处理。
 
-- `end_date`
+- `analysis.end_date` / `cache.end_date`
   统计结束日期，格式为 `YYYY-MM-DD`。这是“包含式”的结束日期，程序内部会自动扩展到下一天的 `00:00:00 UTC` 作为结束边界。
 
-- `project`
+- `analysis.project` / `cache.project`
   BGP 项目标识，例如 `routeviews` 或 `ris`。使用 Broker API 时它会作为资源过滤条件；Route Views 直连模式下本地目录固定归一为 `routeviews`。
 
-- `collector`
+- `analysis.collector` / `cache.collector`
   collector 名称，例如 `route-views.sg` 或 `rrc00`。名称以 `route-views` 开头时使用 Route Views 官方归档，其余名称通过 CAIDA Broker API 发现资源。
 
-- `processor_plugin`
+- `analysis.processor_plugin`
   处理器插件选择器。可以填写插件名，也可以填写动态库路径。
   如果当前构建里只注册了一个插件，这里可以留空，主程序会自动选择它。
   推荐优先填写插件名，例如 `example_message_summary_plugin`，这样不依赖 `.so` 后缀和绝对路径。
   当前仓库已经注册了多个 `examples/` 示例插件，所以实际使用时应当在根目录 `config.json` 里显式填写这个字段。
 
-- `output_dir`
-  下载文件的本地根目录。实际 update 文件会落在类似 `output_dir/project/collector/updates/` 的路径下。
+- `cache.output_dir`
+  下载和分析共用的固定本地缓存根目录。相对路径以仓库根目录为基准，实际 update 文件会落在类似 `cache.output_dir/project/collector/updates/` 的路径下。
 
-- `download_workers`
+- `cache.download_workers`
   下载阶段的并发线程数。值越大，单分片下载速度通常越快，但也会增加网络和上游服务压力。
 
-- `parser_workers`
+- `analysis.parser_workers`
   C++ 中层遍历本地 MRT 文件时的并发线程数。通常对应“同时解析多少个文件”。注意，增加这个线程数会显著增加内存占用，请不要设置为太大的值。
 
-- `message_batch_size`
+- `analysis.message_batch_size`
   中层交给处理器的单批报文数量。中层会先把报文聚成一个 `std::vector<BGPMessage>`，再调用一次处理器的 `handle_messages()`。
 
-- `chunk_size`
+- `analysis.chunk_size`
   分片大小数值。它和 `chunk_unit` 一起决定切片粒度。
 
-- `chunk_unit`
+- `analysis.chunk_unit`
   分片单位，支持 `day` 和 `month`。
   例如：
   - `chunk_size = 1`, `chunk_unit = "day"` 表示按天处理
   - `chunk_size = 1`, `chunk_unit = "month"` 表示按月处理
   - `chunk_size = 7`, `chunk_unit = "day"` 表示按 7 天处理
 
-- `max_cache_size_gb`
+- `analysis.max_cache_size_gb`
   本地缓存目录的大致上限，单位是 `GiB`，支持小数，例如 `1.5`。当当前分片需要下载新文件，而且缓存总量已经明显超过这个值时，程序会在下载前按“最旧文件优先”粗略删除一批旧缓存。
 
-- `limit`
-  下载文件数量限制。
-  `-1` 表示不限制；正整数表示每次运行最多只处理前 `N` 个匹配文件，通常用于测试。
+- `analysis.limit` / `cache.limit`
+  文件数量限制。`analysis.limit` 限制一次分析最多处理的匹配文件数，`cache.limit` 限制一次预下载最多下载的匹配文件数。`-1` 表示不限制，正整数通常用于测试。
 
-- `log_phase_transitions`
+- `analysis.log_phase_transitions`
   是否输出 `download phase`、`process phase`、`cache eviction` 这类阶段切换日志。
 
-- `log_chunk_summary`
+- `analysis.log_chunk_summary`
   是否在每个分片处理完成后输出一次当前累计统计。
   开启后，即使程序中途异常退出，终端里也会保留已经完成分片的累计结果。
 
@@ -532,7 +565,7 @@ cp config.example.json config.json
 5. 新建 `plugins/my_processor/CMakeLists.txt`
 6. 在 `plugins/my_processor/CMakeLists.txt` 里调用 `bgpstream_add_processor_plugin(...)`
 7. 重新执行 `cmake -S . -B build && cmake --build build`
-8. 如果当前只注册了这一个插件，可以直接运行主程序；如果注册了多个插件，就在根目录 `config.json` 里的 `processor_plugin` 字段指定其中一个
+8. 如果当前只注册了这一个插件，可以直接运行主程序；如果注册了多个插件，就在根目录 `config.json` 里的 `analysis.processor_plugin` 字段指定其中一个
 
 一个最小示例：
 
@@ -570,12 +603,10 @@ bgpstream_add_processor_plugin(
 )
 ```
 
-构建后，直接把根目录 `config.json` 改成例如：
+构建后，把根目录 `config.json` 中 `analysis` 区块的插件字段改成：
 
-```json
-{
-  "processor_plugin": "my_processor_plugin"
-}
+```text
+"processor_plugin": "my_processor_plugin"
 ```
 
 然后运行：
@@ -611,12 +642,10 @@ bgpstream_add_processor_plugin(
 - `example_withdrawal_prefix_plugin`
 - `example_origin_asn_plugin`
 
-也就是说，根目录 `config.json` 里推荐直接这样写：
+也就是说，推荐把根目录 `config.json` 的 `analysis.processor_plugin` 改为：
 
-```json
-{
-  "processor_plugin": "example_origin_asn_plugin"
-}
+```text
+"processor_plugin": "example_origin_asn_plugin"
 ```
 
 把这个字段改成不同插件名，就可以在不改 `main.cpp`、不增加额外配置文件的情况下切换处理逻辑。

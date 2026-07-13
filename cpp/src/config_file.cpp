@@ -36,26 +36,40 @@ class JsonConfigParser {
         expect('{');
         skip_whitespace();
 
-        if (peek() == '}') {
-            ++position_;
-            skip_whitespace();
-            ensure_eof();
-            return;
-        }
-
         while (true) {
+            if (peek() == '}') {
+                ++position_;
+                break;
+            }
             skip_whitespace();
             const std::string key = parse_string();
             skip_whitespace();
             expect(':');
             skip_whitespace();
-            const JsonScalar value = parse_scalar();
-            apply_value(key, value);
+            if (key == "analysis") {
+                if (has_analysis_) {
+                    error("Duplicate top-level section 'analysis'");
+                }
+                has_analysis_ = true;
+                parse_section(key);
+            } else if (key == "cache") {
+                if (has_cache_) {
+                    error("Duplicate top-level section 'cache'");
+                }
+                has_cache_ = true;
+                parse_section(key);
+            } else {
+                error("Unknown top-level config section '" + key + "'; expected 'analysis' or 'cache'");
+            }
             skip_whitespace();
 
             const char ch = peek();
             if (ch == ',') {
                 ++position_;
+                skip_whitespace();
+                if (peek() == '}') {
+                    error("Trailing comma is not allowed");
+                }
                 continue;
             }
             if (ch == '}') {
@@ -67,6 +81,15 @@ class JsonConfigParser {
 
         skip_whitespace();
         ensure_eof();
+        if (!has_analysis_) {
+            throw std::runtime_error("Config file " + path_.string() + " is missing the 'analysis' section");
+        }
+        if (!has_cache_) {
+            throw std::runtime_error("Config file " + path_.string() + " is missing the 'cache' section");
+        }
+
+        config_->output_dir = config_->cache.output_dir;
+        config_->download_workers = config_->cache.download_workers;
     }
 
    private:
@@ -234,6 +257,44 @@ class JsonConfigParser {
         error("Unsupported JSON value type");
     }
 
+    void parse_section(const std::string &section) {
+        expect('{');
+        skip_whitespace();
+        while (true) {
+            if (peek() == '}') {
+                ++position_;
+                return;
+            }
+
+            const std::string key = parse_string();
+            skip_whitespace();
+            expect(':');
+            skip_whitespace();
+            const JsonScalar value = parse_scalar();
+            if (section == "analysis") {
+                apply_analysis_value(key, value);
+            } else {
+                apply_cache_value(key, value);
+            }
+            skip_whitespace();
+
+            const char ch = peek();
+            if (ch == ',') {
+                ++position_;
+                skip_whitespace();
+                if (peek() == '}') {
+                    error("Trailing comma is not allowed in section '" + section + "'");
+                }
+                continue;
+            }
+            if (ch == '}') {
+                ++position_;
+                return;
+            }
+            error("Expected ',' or '}' in section '" + section + "'");
+        }
+    }
+
     int require_int(const std::string &key, const JsonScalar &value) const {
         if (value.kind != JsonScalarKind::Number) {
             throw std::runtime_error("Config key '" + key + "' must be an integer");
@@ -277,7 +338,7 @@ class JsonConfigParser {
         throw std::runtime_error("Config key '" + key + "' must be 'day' or 'month'");
     }
 
-    void apply_value(const std::string &key, const JsonScalar &value) {
+    void apply_analysis_value(const std::string &key, const JsonScalar &value) {
         if (key == "start_date") {
             config_->start_date = require_string(key, value);
         } else if (key == "end_date") {
@@ -288,10 +349,6 @@ class JsonConfigParser {
             config_->collector = require_string(key, value);
         } else if (key == "processor_plugin") {
             config_->processor_plugin = require_string(key, value);
-        } else if (key == "output_dir") {
-            config_->output_dir = require_string(key, value);
-        } else if (key == "download_workers") {
-            config_->download_workers = require_int(key, value);
         } else if (key == "parser_workers") {
             config_->parser_workers = require_int(key, value);
         } else if (key == "message_batch_size") {
@@ -315,7 +372,31 @@ class JsonConfigParser {
         } else if (key == "log_final_summary") {
             config_->log_final_summary = require_bool(key, value);
         } else {
-            throw std::runtime_error("Unknown config key '" + key + "' in " + path_.string());
+            throw std::runtime_error("Unknown config key 'analysis." + key + "' in " + path_.string());
+        }
+    }
+
+    void apply_cache_value(const std::string &key, const JsonScalar &value) {
+        if (key == "start_date") {
+            config_->cache.start_date = require_string(key, value);
+        } else if (key == "end_date") {
+            config_->cache.end_date = require_string(key, value);
+        } else if (key == "project") {
+            config_->cache.project = require_string(key, value);
+        } else if (key == "collector") {
+            config_->cache.collector = require_string(key, value);
+        } else if (key == "output_dir") {
+            config_->cache.output_dir = require_string(key, value);
+        } else if (key == "download_workers") {
+            config_->cache.download_workers = require_int(key, value);
+        } else if (key == "limit") {
+            if (value.kind == JsonScalarKind::Null) {
+                config_->cache.limit = -1;
+            } else {
+                config_->cache.limit = require_int(key, value);
+            }
+        } else {
+            throw std::runtime_error("Unknown config key 'cache." + key + "' in " + path_.string());
         }
     }
 
@@ -323,6 +404,8 @@ class JsonConfigParser {
     const std::filesystem::path path_;
     Config *config_ = nullptr;
     std::size_t position_ = 0;
+    bool has_analysis_ = false;
+    bool has_cache_ = false;
 };
 
 }  // namespace
@@ -337,6 +420,15 @@ void apply_json_config_file(const std::filesystem::path &path, Config *config) {
     buffer << input.rdbuf();
     JsonConfigParser parser(buffer.str(), path, config);
     parser.parse();
+
+    if (config->cache.output_dir.empty()) {
+        throw std::runtime_error("Config key 'cache.output_dir' must not be empty");
+    }
+    if (config->cache.output_dir.is_relative()) {
+        const std::filesystem::path config_directory = std::filesystem::absolute(path).parent_path();
+        config->cache.output_dir = (config_directory / config->cache.output_dir).lexically_normal();
+    }
+    config->output_dir = config->cache.output_dir;
 }
 
 }  // namespace bgpstream_runner

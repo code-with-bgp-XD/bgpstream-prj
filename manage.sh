@@ -10,20 +10,34 @@ command_name=""
 output_dir_override=""
 build_dir="$DEFAULT_BUILD_DIR"
 run_args=()
+download_project=""
+download_collector=""
+download_start_date=""
+download_end_date=""
+download_workers=""
+download_limit=""
+download_option_used=false
 
 usage() {
   cat <<'EOF'
-Usage: ./manage.sh <build|run|cache-size|cache-clear> [options] [-- program_args...]
+Usage: ./manage.sh <build|run|download|cache-size|cache-clear> [options] [-- program_args...]
 
 Commands:
   build                      Configure and build the project
   run                        Configure, build, and run the project executable
+  download                   Download one source and date range into the local cache
   cache-size                 Show cached file count and total size
   cache-clear                Delete all cached files under output_dir
 
 Options:
-  --build-dir PATH           Override the build directory for build/run
-  --output-dir PATH          Override output_dir for cache commands
+  --build-dir PATH           Override the build directory for build/run/download
+  --output-dir PATH          Override output_dir for cache-size/cache-clear only
+  --project NAME             Temporarily override cache.project for download
+  --collector NAME           Temporarily override cache.collector for download
+  --start-date YYYY-MM-DD    Temporarily override cache.start_date for download
+  --end-date YYYY-MM-DD      Temporarily override cache.end_date for download
+  --download-workers N       Override download concurrency for download
+  --limit N                  Limit matched files for download (for testing)
   --help, -h                 Show this help text
 EOF
 }
@@ -128,6 +142,43 @@ run_program() {
   "$executable_path" "${run_args[@]}"
 }
 
+run_download() {
+  local resolved_build_dir
+  local executable_path
+  local -a download_args
+  resolved_build_dir="$(resolve_build_dir)"
+  executable_path="$resolved_build_dir/bgpstream_analyzer"
+
+  if [ ! -x "$executable_path" ]; then
+    echo "Executable does not exist or is not runnable: $executable_path" >&2
+    exit 1
+  fi
+
+  download_args=(
+    --download-only
+  )
+  if [ -n "$download_project" ]; then
+    download_args+=(--project "$download_project")
+  fi
+  if [ -n "$download_collector" ]; then
+    download_args+=(--collector "$download_collector")
+  fi
+  if [ -n "$download_start_date" ]; then
+    download_args+=(--start-date "$download_start_date")
+  fi
+  if [ -n "$download_end_date" ]; then
+    download_args+=(--end-date "$download_end_date")
+  fi
+  if [ -n "$download_workers" ]; then
+    download_args+=(--download-workers "$download_workers")
+  fi
+  if [ -n "$download_limit" ]; then
+    download_args+=(--limit "$download_limit")
+  fi
+
+  "$executable_path" "${download_args[@]}"
+}
+
 run_cache_size() {
   local cache_root="$1"
   mapfile -t cache_summary < <(summarize_cache "$cache_root")
@@ -161,7 +212,7 @@ run_cache_clear() {
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    build|run|cache-size|cache-clear)
+    build|run|download|cache-size|cache-clear)
       if [ -n "$command_name" ]; then
         echo "Only one command may be provided." >&2
         usage >&2
@@ -191,6 +242,60 @@ while [ "$#" -gt 0 ]; do
       output_dir_override="$2"
       shift 2
       ;;
+    --project)
+      if [ "$#" -lt 2 ]; then
+        echo "Missing value for --project" >&2
+        exit 1
+      fi
+      download_project="$2"
+      download_option_used=true
+      shift 2
+      ;;
+    --collector)
+      if [ "$#" -lt 2 ]; then
+        echo "Missing value for --collector" >&2
+        exit 1
+      fi
+      download_collector="$2"
+      download_option_used=true
+      shift 2
+      ;;
+    --start-date)
+      if [ "$#" -lt 2 ]; then
+        echo "Missing value for --start-date" >&2
+        exit 1
+      fi
+      download_start_date="$2"
+      download_option_used=true
+      shift 2
+      ;;
+    --end-date)
+      if [ "$#" -lt 2 ]; then
+        echo "Missing value for --end-date" >&2
+        exit 1
+      fi
+      download_end_date="$2"
+      download_option_used=true
+      shift 2
+      ;;
+    --download-workers)
+      if [ "$#" -lt 2 ]; then
+        echo "Missing value for --download-workers" >&2
+        exit 1
+      fi
+      download_workers="$2"
+      download_option_used=true
+      shift 2
+      ;;
+    --limit)
+      if [ "$#" -lt 2 ]; then
+        echo "Missing value for --limit" >&2
+        exit 1
+      fi
+      download_limit="$2"
+      download_option_used=true
+      shift 2
+      ;;
     --help|-h)
       usage
       exit 0
@@ -208,6 +313,17 @@ if [ -z "$command_name" ]; then
   exit 1
 fi
 
+if [ "$command_name" != "download" ] && [ "$download_option_used" = true ]; then
+  echo "Download source/date options may only be used with the download command." >&2
+  usage >&2
+  exit 1
+fi
+
+if [ "$command_name" = "download" ] && [ -n "$output_dir_override" ]; then
+  echo "The download directory is fixed by cache.output_dir in config.json." >&2
+  exit 1
+fi
+
 case "$command_name" in
   build)
     run_build
@@ -215,6 +331,10 @@ case "$command_name" in
   run)
     run_build
     run_program
+    ;;
+  download)
+    run_build
+    run_download
     ;;
   cache-size)
     run_cache_size "$(resolve_cache_root)"

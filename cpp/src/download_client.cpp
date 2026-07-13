@@ -1125,11 +1125,16 @@ void DownloadClient::download_range(const ClosedDateRange &range, int limit_over
         const Resource &resource = resources[failure.resource_index];
         const std::filesystem::path destination = destination_path(config_.output_dir, resource);
         const std::filesystem::path partial = partial_path(destination);
-        std::error_code remove_error;
         const std::uint64_t partial_bytes = safe_file_size(partial);
-        std::filesystem::remove(partial, remove_error);
-        if (partial_bytes > 0 && !remove_error) {
-            std::cerr << "已删除失败文件的残留分片: " << partial.filename().string() << " ("
+        if (failure.discard_partial) {
+            std::error_code remove_error;
+            std::filesystem::remove(partial, remove_error);
+            if (partial_bytes > 0 && !remove_error) {
+                std::cerr << "已删除无法续传的损坏分片: " << partial.filename().string() << " ("
+                          << format_bytes(partial_bytes) << ")\n";
+            }
+        } else if (partial_bytes > 0) {
+            std::cerr << "已保留下载分片以便下次断点续传: " << partial.filename().string() << " ("
                       << format_bytes(partial_bytes) << ")\n";
         }
         std::cerr << "下载失败: " << destination.filename().string() << " | " << failure.reason << " | "

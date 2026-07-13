@@ -1,18 +1,27 @@
 {
-  "start_date": "2025-01-01",
-  "end_date": "2026-01-01",
-  "project": "routeviews",
-  "collector": "route-views.sg",
-  "processor_plugin": "example_message_summary_plugin",
-  "output_dir": "bgpdata",
-  "download_workers": 32,
-  "parser_workers": 8,
-  "message_batch_size": 1048576,
-  "chunk_size": 1,
-  "chunk_unit": "day",
-  "max_cache_size_gb": 5.0,
-  "limit": -1,
-  "log_phase_transitions": true,
-  "log_chunk_summary": true,
-  "log_final_summary": true
+  "analysis": {
+    "start_date": "2025-01-01",
+    "end_date": "2026-01-01",
+    "project": "routeviews",
+    "collector": "route-views.sg",
+    "processor_plugin": "example_message_summary_plugin",
+    "parser_workers": 8,
+    "message_batch_size": 1048576,
+    "chunk_size": 1,
+    "chunk_unit": "day",
+    "max_cache_size_gb": 5.0,
+    "limit": -1,
+    "log_phase_transitions": true,
+    "log_chunk_summary": true,
+    "log_final_summary": true
+  },
+  "cache": {
+    "start_date": "2025-01-01",
+    "end_date": "2026-01-01",
+    "project": "routeviews",
+    "collector": "route-views.sg",
+    "output_dir": "bgpdata",
+    "download_workers": 32,
+    "limit": -1
+  }
 }

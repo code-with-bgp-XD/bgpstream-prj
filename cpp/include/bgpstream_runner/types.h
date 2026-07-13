@@ -27,6 +27,16 @@ enum class ChunkUnit {
     Month,
 };
 
+struct CacheConfig {
+    std::string start_date = kDefaultStartDate;
+    std::string end_date = kDefaultEndDate;
+    std::string project = kDefaultProject;
+    std::string collector = kDefaultCollector;
+    std::filesystem::path output_dir = kDefaultDataRoot;
+    int download_workers = kDefaultDownloadWorkers;
+    int limit = -1;
+};
+
 struct Config {
     std::string start_date = kDefaultStartDate;
     std::string end_date = kDefaultEndDate;
@@ -44,6 +54,8 @@ struct Config {
     bool log_phase_transitions = true;
     bool log_chunk_summary = true;
     bool log_final_summary = true;
+    bool download_only = false;
+    CacheConfig cache;
 };
 
 struct ClosedDateRange {
