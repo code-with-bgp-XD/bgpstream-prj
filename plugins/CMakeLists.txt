@@ -1,1 +1,2 @@
+add_subdirectory(single_router_churn)
 add_subdirectory(timestamp_order_checker)
