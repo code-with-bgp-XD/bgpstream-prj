@@ -70,6 +70,9 @@ void run_download_only(const bgpstream_runner::Config &config) {
 }  // namespace
 
 int main(int argc, char **argv) {
+    std::ios::sync_with_stdio(false);
+    std::cin.tie(nullptr);
+
     std::unique_ptr<bgpstream_runner::LoadedProcessorPlugin> processor_plugin;
     std::unique_ptr<bgpstream_runner::ChunkEngine> engine;
     try {

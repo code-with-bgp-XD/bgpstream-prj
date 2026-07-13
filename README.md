@@ -202,6 +202,10 @@
 
 需要长期维护的自定义插件可以放在 `plugins/<plugin_name>/`。当 `plugins/CMakeLists.txt` 存在时，根构建会自动接入该目录；仓库内置的可运行示例位于 `examples/`。
 
+当前的 `plugins/timestamp_order_checker/` 插件会按接收顺序把 message 的秒级和微秒级时间戳写入
+`log/message-timestamps-*.log` 独立文件，并分别报告时间戳是否非递减、是否严格递增。构建后的插件选择器是
+`timestamp_order_checker_plugin`。
+
 ### 主入口
 
 - `cpp/src/main.cpp`
