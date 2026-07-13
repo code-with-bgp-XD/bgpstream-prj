@@ -21,6 +21,11 @@ class MessageProcessor {
     // this processor instance. The engine never calls finalize() or
     // print_summary() while a handle_messages() call is still running.
     virtual bool supports_concurrent_message_handling() const noexcept { return false; }
+
+    // Request nondecreasing (timestamp, timestamp_microseconds) order across
+    // every handle_messages() call. This takes precedence over concurrent
+    // message handling.
+    virtual bool requires_strict_chronological_order() const noexcept { return false; }
 };
 
 }  // namespace bgpstream_runner

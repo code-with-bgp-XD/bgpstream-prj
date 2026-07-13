@@ -170,6 +170,9 @@
   - `supports_concurrent_message_handling()`
     声明同一个处理器实例是否允许多个解析线程同时进入 `handle_messages()`。
     默认返回 `false`，因此未显式开启的插件仍由框架串行调用。
+  - `requires_strict_chronological_order()`
+    声明插件是否要求所有传入报文严格按 `timestamp` 和 `timestamp_microseconds` 的非递减顺序排列。
+    默认返回 `false`；返回 `true` 时，严格时序优先于并发处理能力。
   - `finalize()`
     在整个时间范围内的文件都处理完成后调用一次，适合做最终汇总或收尾处理。
     默认实现为空，不要求每个插件都重写。
@@ -501,7 +504,7 @@ cp config.example.json config.json
   下载阶段的并发线程数。值越大，单分片下载速度通常越快，但也会增加网络和上游服务压力。
 
 - `analysis.parser_workers`
-  C++ 中层遍历本地 MRT 文件时的并发线程数。通常对应“同时解析多少个文件”。当插件的 `supports_concurrent_message_handling()` 返回 `true` 时，这些线程也可以同时进入同一个插件实例的 `handle_messages()`；否则框架仍会把插件调用串行化。注意，增加这个线程数会显著增加内存占用，请不要设置为太大的值。
+  C++ 中层遍历本地 MRT 文件时的并发线程数。通常对应“同时解析多少个文件”。当插件的 `supports_concurrent_message_handling()` 返回 `true` 时，这些线程也可以同时进入同一个插件实例的 `handle_messages()`；否则框架仍会把插件调用串行化。当 `requires_strict_chronological_order()` 返回 `true` 时，为保证全局时序，框架会忽略这里更大的并发值并只使用一个解析线程。注意，增加这个线程数会显著增加内存占用，请不要设置为太大的值。
 
 - `analysis.message_batch_size`
   中层交给处理器的单批报文数量。中层会先把报文聚成一个 `std::vector<BGPMessage>`，再调用一次处理器的 `handle_messages()`。
@@ -542,6 +545,7 @@ cp config.example.json config.json
 - `processed_chunks`
 - `files_used`
 - `processor_concurrent_message_handling`
+- `processor_strict_chronological_order`
 - `visited_messages`
 - `rib_messages`
 - `announcement_messages`
@@ -596,13 +600,21 @@ class MyProcessor : public bgpstream_runner::MessageProcessor {
 BGPSTREAM_RUNNER_EXPORT_PROCESSOR(MyProcessor)
 ```
 
-上面的处理器没有重写并发能力声明，因此 `handle_messages()` 保持串行调用。如果插件已经自行保护所有会在该函数中读写的共享状态，可以显式开启并发：
+上面的处理器没有重写并发能力声明，因此 `handle_messages()` 保持串行调用。需要注意，串行只表示不会同时进入插件，并不保证多个解析线程提交批次的先后顺序。如果插件已经自行保护所有会在该函数中读写的共享状态，可以显式开启并发：
 
 ```cpp
 bool supports_concurrent_message_handling() const noexcept override { return true; }
 ```
 
 开启后，框架不再为这个处理器实例加全局互斥锁；并发调用数最多受 `analysis.parser_workers` 和当前分片文件数限制，调用及完成顺序不作保证。插件必须自行使用原子变量、互斥锁、线程局部状态等方式避免数据竞争。`finalize()` 和 `print_summary()` 只会在当前解析线程全部结束后调用，不会与 `handle_messages()` 并发执行。仓库里的 `example_announcement_counter_plugin` 展示了使用原子计数器安全开启该选项的方式。
+
+如果插件依赖严格的时间顺序，可以添加：
+
+```cpp
+bool requires_strict_chronological_order() const noexcept override { return true; }
+```
+
+此时框架按照资源的归档起始时间逐文件处理，在每个批次内按 `(BGPMessage.timestamp, BGPMessage.timestamp_microseconds)` 稳定排序，并在整个运行期间校验跨批次、跨文件和跨分片的时间戳不发生倒退。相同时间戳的多条报文可以连续出现。如果源文件出现无法跨批次修正的时间倒退，程序会在把乱序批次交给插件之前终止并报告错误。严格时序模式始终只使用一个解析线程；即使 `supports_concurrent_message_handling()` 同时返回 `true`，也不会并发进入 `handle_messages()`。
 
 `BGPMessage` 和 `MessageProcessor` 都是插件 ABI 的一部分。本次扩展后，旧的插件动态库必须用当前头文件重新编译；加载器会检查宏导出的 API 版本，并对未重编译或版本不一致的插件给出明确错误，而不是继续执行不兼容的二进制代码。
 

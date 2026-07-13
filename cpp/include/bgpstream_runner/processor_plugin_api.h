@@ -6,7 +6,7 @@
 
 namespace bgpstream_runner {
 
-inline constexpr std::uint32_t kProcessorPluginAPIVersion = 2;
+inline constexpr std::uint32_t kProcessorPluginAPIVersion = 3;
 
 using ProcessorAPIVersionFn = std::uint32_t (*)();
 using CreateProcessorFn = MessageProcessor *(*)();

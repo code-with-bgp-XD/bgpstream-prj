@@ -1,9 +1,13 @@
 #pragma once
 
+#include <cstdint>
+#include <ctime>
 #include <filesystem>
 #include <mutex>
+#include <optional>
 #include <ostream>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "bgpstream_runner/download_client.h"
@@ -37,9 +41,12 @@ class ChunkEngine {
         bool all_sizes_known = true;
     };
 
+    using MessageTimestamp = std::pair<std::time_t, std::uint32_t>;
+
     void process_files(const std::vector<std::filesystem::path> &files, const ClosedDateRange &chunk);
     FileTraversalStats traverse_single_file(const std::filesystem::path &file_path, const ClosedDateRange &chunk,
                                             std::mutex *processor_mutex);
+    void dispatch_message_batch(std::vector<BGPMessage> &messages, std::mutex *processor_mutex);
     void reset_stats();
     void increment_chunk_count();
     void record_processed_file(const FileTraversalStats &file_stats);
@@ -52,7 +59,9 @@ class ChunkEngine {
     Config config_;
     DownloadClient download_client_;
     MessageProcessor &processor_;
-    const bool processor_supports_concurrent_message_handling_;
+    const bool processor_requires_strict_chronological_order_;
+    const bool processor_uses_concurrent_message_handling_;
+    std::optional<MessageTimestamp> last_delivered_message_timestamp_;
     mutable std::mutex record_file_mutex_;
     std::filesystem::path record_file_path_;
     mutable std::mutex stats_mutex_;

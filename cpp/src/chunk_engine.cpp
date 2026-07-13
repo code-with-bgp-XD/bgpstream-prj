@@ -404,11 +404,14 @@ ChunkEngine::ChunkEngine(Config config, MessageProcessor &processor)
     : config_(std::move(config)),
       download_client_(config_),
       processor_(processor),
-      processor_supports_concurrent_message_handling_(processor.supports_concurrent_message_handling()),
+      processor_requires_strict_chronological_order_(processor.requires_strict_chronological_order()),
+      processor_uses_concurrent_message_handling_(processor.supports_concurrent_message_handling() &&
+                                                  !processor_requires_strict_chronological_order_),
       record_file_path_(make_record_file_path()) {}
 
 RangeProcessingStats ChunkEngine::run() {
     reset_stats();
+    last_delivered_message_timestamp_.reset();
     const ClosedDateRange range = parse_closed_date_range(config_);
     const std::vector<ClosedDateRange> chunks = split_range_by_chunks(range, config_.chunk_size, config_.chunk_unit);
     int remaining_limit = config_.limit;
@@ -496,7 +499,9 @@ void ChunkEngine::print_summary(std::ostream &out, const RangeProcessingStats &s
     out << "download_workers: " << config_.download_workers << '\n';
     out << "parser_workers: " << config_.parser_workers << '\n';
     out << "processor_concurrent_message_handling: "
-        << (processor_supports_concurrent_message_handling_ ? "true" : "false") << '\n';
+        << (processor_uses_concurrent_message_handling_ ? "true" : "false") << '\n';
+    out << "processor_strict_chronological_order: "
+        << (processor_requires_strict_chronological_order_ ? "true" : "false") << '\n';
     out << "message_batch_size: " << config_.message_batch_size << '\n';
     out << "chunk_size: " << config_.chunk_size << '\n';
     out << "chunk_unit: " << chunk_unit_to_string(config_.chunk_unit) << '\n';
@@ -549,14 +554,18 @@ void ChunkEngine::process_files(const std::vector<std::filesystem::path> &files,
     }
 
     FileProgressDisplay progress(files.size(), total_file_bytes(files));
-    const std::size_t worker_count =
-        std::min<std::size_t>(files.size(), static_cast<std::size_t>(config_.parser_workers));
+    // `files` preserves the resource list's initial-time ordering. A single
+    // worker keeps that order across files when strict delivery is requested.
+    const std::size_t worker_count = processor_requires_strict_chronological_order_
+                                         ? 1
+                                         : std::min<std::size_t>(files.size(),
+                                                                 static_cast<std::size_t>(config_.parser_workers));
 
     try {
         std::atomic<std::size_t> next_file_index{0};
         std::mutex processor_mutex;
         std::mutex *const processor_mutex_ptr =
-            processor_supports_concurrent_message_handling_ ? nullptr : &processor_mutex;
+            processor_uses_concurrent_message_handling_ ? nullptr : &processor_mutex;
         std::mutex parse_failures_mutex;
         std::mutex fatal_error_mutex;
         std::exception_ptr fatal_error;
@@ -659,13 +668,7 @@ ChunkEngine::FileTraversalStats ChunkEngine::traverse_single_file(const std::fil
             if (message_batch.empty()) {
                 return;
             }
-            if (processor_mutex == nullptr) {
-                processor_.handle_messages(message_batch);
-            } else {
-                std::lock_guard<std::mutex> lock(*processor_mutex);
-                processor_.handle_messages(message_batch);
-            }
-            message_batch.clear();
+            dispatch_message_batch(message_batch, processor_mutex);
         };
 
         bgpstream_record_t *record = nullptr;
@@ -756,6 +759,45 @@ ChunkEngine::FileTraversalStats ChunkEngine::traverse_single_file(const std::fil
         destroy_stream();
         throw;
     }
+}
+
+void ChunkEngine::dispatch_message_batch(std::vector<BGPMessage> &messages, std::mutex *processor_mutex) {
+    if (messages.empty()) {
+        return;
+    }
+
+    std::optional<MessageTimestamp> delivered_timestamp;
+    if (processor_requires_strict_chronological_order_) {
+        const auto timestamp_of = [](const BGPMessage &message) {
+            return MessageTimestamp{message.timestamp, message.timestamp_microseconds};
+        };
+        std::stable_sort(messages.begin(), messages.end(), [&](const BGPMessage &left, const BGPMessage &right) {
+            return timestamp_of(left) < timestamp_of(right);
+        });
+
+        const MessageTimestamp first_timestamp = timestamp_of(messages.front());
+        if (last_delivered_message_timestamp_.has_value() && first_timestamp < *last_delivered_message_timestamp_) {
+            std::ostringstream error;
+            error << "Strict chronological message order cannot be guaranteed: " << first_timestamp.first << '.'
+                  << std::setfill('0') << std::setw(6) << first_timestamp.second << " from "
+                  << messages.front().source_file << " follows " << last_delivered_message_timestamp_->first << '.'
+                  << std::setfill('0') << std::setw(6) << last_delivered_message_timestamp_->second;
+            throw std::runtime_error(error.str());
+        }
+        delivered_timestamp = timestamp_of(messages.back());
+    }
+
+    if (processor_mutex == nullptr) {
+        processor_.handle_messages(messages);
+    } else {
+        std::lock_guard<std::mutex> lock(*processor_mutex);
+        processor_.handle_messages(messages);
+    }
+
+    if (delivered_timestamp.has_value()) {
+        last_delivered_message_timestamp_ = delivered_timestamp;
+    }
+    messages.clear();
 }
 
 void ChunkEngine::reset_stats() {
