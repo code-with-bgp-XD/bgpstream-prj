@@ -248,6 +248,7 @@
 
 - 支持 C++17 的 GCC 或 Clang
 - CMake 3.16 或更高版本
+- GDB：仅使用 VS Code 调试功能时需要
 - `libcurl` 开发头文件和库：原生 HTTP/HTTPS 下载
 - `ncurses` 开发头文件和库：终端进度显示
 - CAIDA `libBGPStream` 开发头文件和库：MRT/BGP 解析
@@ -258,7 +259,7 @@ Ubuntu / Debian 推荐按以下步骤安装。先安装本项目自身和添加�
 ```bash
 sudo apt-get update
 sudo apt-get install -y \
-  build-essential cmake curl wget ca-certificates gnupg lsb-release \
+  build-essential cmake gdb curl wget ca-certificates gnupg lsb-release \
   libcurl4-openssl-dev libncurses-dev
 ```
 
@@ -284,7 +285,7 @@ Fedora / RHEL 系列可先安装本项目和 `libBGPStream` 源码构建所需�
 
 ```bash
 sudo dnf install -y \
-  gcc gcc-c++ make cmake curl-devel ncurses-devel \
+  gcc gcc-c++ make cmake gdb curl-devel ncurses-devel \
   zlib-devel bzip2-devel librdkafka-devel
 ```
 
@@ -321,6 +322,23 @@ cmake --build build
 - `build/bgpstream_analyzer`
 - `build/bgpstream_processor_plugins.tsv`
 - `build/compile_commands.json`
+
+### VS Code 一键构建、运行和调试
+
+仓库内的 `.vscode/` 已包含 Debug 模式所需配置。用 VS Code 打开仓库根目录后，按提示安装推荐的 C/C++ 和 CMake Tools 扩展，并确认系统中可以执行 `gdb`。程序运行前还需要存在根目录 `config.json`；首次使用时可由模板复制：
+
+```bash
+cp config.example.json config.json
+```
+
+常用入口如下：
+
+- `Ctrl+Shift+B`：执行默认任务 `CMake: 构建 (Debug)`，自动完成 CMake 配置和构建。
+- `终端 -> 运行任务 -> 运行: bgpstream_analyzer`：自动构建后直接运行。
+- 在“运行和调试”面板选择 `调试: bgpstream_analyzer (GDB)`，按 `F5`：自动构建后启动 GDB 调试。
+- 选择同一调试配置后按 `Ctrl+F5`：自动构建后运行，但不附加调试器。
+
+需要向程序传入临时命令行参数时，可编辑 `.vscode/tasks.json` 或 `.vscode/launch.json` 中对应配置的 `args` 数组。所有入口都把仓库根目录设为工作目录，因此可以正确找到 `config.json` 和构建出的处理器插件清单。
 
 运行过程中还会在仓库根目录下的 `log/` 目录生成文本记录文件：
 
