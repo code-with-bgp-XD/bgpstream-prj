@@ -84,6 +84,10 @@ class TimestampOrderCheckerProcessor : public bgpstream_runner::MessageProcessor
 
     std::string_view name() const override { return "timestamp_order_checker"; }
 
+    bgpstream_runner::BGPMessageFields required_message_fields() const noexcept override {
+        return bgpstream_runner::BGPMessageFields::Timestamp;
+    }
+
     bool requires_strict_chronological_order() const noexcept override { return true; }
 
     void handle_messages(const std::vector<bgpstream_runner::BGPMessage> &messages) override {

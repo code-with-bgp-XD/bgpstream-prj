@@ -13,6 +13,10 @@ class MessageProcessor {
     virtual ~MessageProcessor() = default;
 
     virtual std::string_view name() const = 0;
+
+    // Called once before parsing. Every BGPMessage member read by the
+    // processor must be included in this mask.
+    virtual BGPMessageFields required_message_fields() const noexcept = 0;
     virtual void handle_messages(const std::vector<BGPMessage> &messages) = 0;
     virtual void finalize() {}
     virtual void print_summary(std::ostream &out) const = 0;

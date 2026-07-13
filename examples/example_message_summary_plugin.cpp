@@ -9,6 +9,10 @@ class ExampleMessageSummaryProcessor : public bgpstream_runner::MessageProcessor
    public:
     std::string_view name() const override { return "example_message_summary"; }
 
+    bgpstream_runner::BGPMessageFields required_message_fields() const noexcept override {
+        return bgpstream_runner::BGPMessageFields::Type | bgpstream_runner::BGPMessageFields::Prefix;
+    }
+
     void handle_messages(const std::vector<bgpstream_runner::BGPMessage> &messages) override {
         processed_messages_ += messages.size();
 

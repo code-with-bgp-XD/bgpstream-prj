@@ -61,6 +61,7 @@ class ChunkEngine {
     MessageProcessor &processor_;
     const bool processor_requires_strict_chronological_order_;
     const bool processor_uses_concurrent_message_handling_;
+    const BGPMessageFields message_fields_;
     std::optional<MessageTimestamp> last_delivered_message_timestamp_;
     mutable std::mutex record_file_mutex_;
     std::filesystem::path record_file_path_;

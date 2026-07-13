@@ -5,6 +5,8 @@
 
 插件通过 `requires_strict_chronological_order()` 请求框架按时间顺序交付，因此框架会使用单个解析线程，
 在批次内稳定排序，并在跨批次、跨文件和跨分片发生时间倒退时直接报错。
+插件同时通过 `required_message_fields()` 只声明 `BGPMessageFields::Timestamp`，因此每条 message 不会构造
+与时间顺序检查无关的 prefix、地址、AS path 或 community 数据。
 
 构建并运行：
 

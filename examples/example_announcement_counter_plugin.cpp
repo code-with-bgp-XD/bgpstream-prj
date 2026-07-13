@@ -8,6 +8,10 @@ class ExampleAnnouncementCounterProcessor : public bgpstream_runner::MessageProc
    public:
     std::string_view name() const override { return "example_announcement_counter"; }
 
+    bgpstream_runner::BGPMessageFields required_message_fields() const noexcept override {
+        return bgpstream_runner::BGPMessageFields::Type;
+    }
+
     //bool supports_concurrent_message_handling() const noexcept override { return true; }
 
     void handle_messages(const std::vector<bgpstream_runner::BGPMessage> &messages) override {

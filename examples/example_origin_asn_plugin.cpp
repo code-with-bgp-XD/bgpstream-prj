@@ -8,6 +8,10 @@ class ExampleOriginAsnProcessor : public bgpstream_runner::MessageProcessor {
    public:
     std::string_view name() const override { return "example_origin_asn"; }
 
+    bgpstream_runner::BGPMessageFields required_message_fields() const noexcept override {
+        return bgpstream_runner::BGPMessageFields::Type | bgpstream_runner::BGPMessageFields::OriginAsn;
+    }
+
     void handle_messages(const std::vector<bgpstream_runner::BGPMessage> &messages) override {
         for (const auto &message : messages) {
             if (message.type != bgpstream_runner::BGPMessageType::Announcement || !message.origin_asn.has_value()) {

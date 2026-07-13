@@ -9,6 +9,10 @@ class ExampleWithdrawalPrefixProcessor : public bgpstream_runner::MessageProcess
    public:
     std::string_view name() const override { return "example_withdrawal_prefix"; }
 
+    bgpstream_runner::BGPMessageFields required_message_fields() const noexcept override {
+        return bgpstream_runner::BGPMessageFields::Type | bgpstream_runner::BGPMessageFields::Prefix;
+    }
+
     void handle_messages(const std::vector<bgpstream_runner::BGPMessage> &messages) override {
         for (const auto &message : messages) {
             if (message.type != bgpstream_runner::BGPMessageType::Withdrawal || message.prefix.empty()) {

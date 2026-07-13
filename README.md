@@ -112,26 +112,36 @@
 
 ### BGPMessage 数据模型
 
-`BGPMessage` 现在保存 libBGPStream 公开 record/elem API 能提供的完整信息，而不再只保留类型、秒级时间、前缀和扁平 ASN 列表。字段按来源分为：
+`BGPMessage` 可以承载 libBGPStream 公开 record/elem API 能提供的完整信息。实际运行时，插件通过
+`required_message_fields()` 声明自己会读取的字段，中层只把这些字段物化到每条 message 中。字段按来源分为：
 
 - record 级信息：`record_type`、`record_status`、`timestamp`、`timestamp_microseconds`、`project_name`、`collector_name`、`router_name`、`router_ip`、`dump_position`、`dump_timestamp`、`source_file`、`record_index`、`element_index`。
 - elem 级来源信息：`type`、`originated_timestamp`、`originated_timestamp_microseconds`、`peer_ip`、`peer_asn`、`prefix`、`next_hop`。
-- AS 路径：规范化字符串 `as_path`、保留段类型和边界的 `as_path_segments`、可直接使用的 `origin_asn`。
+- AS 路径：规范化字符串 `as_path`、保留段类型和边界的 `as_path_segments`、扁平视图 `asns`、可直接使用的 `origin_asn`。
 - BGP 路径属性：结构化 `communities`、`origin`、`med`、`local_pref`、`atomic_aggregate`、`aggregator`。
 - 状态与注解：`old_peer_state`、`new_peer_state`、`annotations`。
 
 `BGPMessageType` 支持 `RIB`、`Announcement`、`Withdrawal`、`PeerState` 和 `EndOfRib`。当前下载流程仍读取 update 文件，因此通常收到 announcement、withdrawal 和 peer-state；RIB 类型为以后接入 RIB 文件保留。`EndOfRib` 会在所用 libBGPStream 版本公开该元素类型时自动启用。
 
-兼容性和有效性约定：
+字段声明和有效性约定：
 
-- 原有的 `type`、`timestamp`、`prefix`、`asns` 均保留；已有插件重新编译后通常不需要修改源码。
+- `BGPMessageFields` 是按位组合的字段集合。插件必须实现 `required_message_fields()`；未声明字段保持默认值，
+  中层不会为它执行字符串转换、容器填充或来源字符串复制，插件也不应读取它。
+- `Timestamp` 同时物化 `timestamp` 和 `timestamp_microseconds`；`OriginatedTimestamp`、`PeerStates` 和
+  `Annotations` 也分别对应同一逻辑数据组。严格时序插件会由框架自动加入 `Timestamp` 作为排序依赖。
+- `ASPathString`、`ASPathSegments`、`FlattenedAsns` 和 `OriginAsn` 是四个独立需求。只声明 `OriginAsn` 时，
+  中层只读取 origin ASN，不会顺带生成 AS path 字符串、结构化 segment 或扁平 ASN。
 - `asns` 仍是方便统计的扁平视图；需要区分 AS_SET、联盟序列和联盟集合时，应使用 `as_path_segments`。
-- `has_as_path` 和 `has_communities` 用于区分“属性不存在”和“属性存在但内容为空”。
+- `HasASPath` 和 `HasCommunities` 分别只物化 `has_as_path` 和 `has_communities`；检查属性是否存在不会触发
+  path 字符串转换或 community 容器填充。
 - `origin`、`med`、`local_pref`、`aggregator`、peer-state 字段使用 `std::optional` 表示 libBGPStream 是否提供了该值。
 - singlefile 接口把 project/collector 标成 `singlefile`；中层会用下载时的 `Config.project` 和 `Config.collector` 替换该占位值，同时用 `source_file` 保留实际本地文件来源。
 - `record_index` 是 record 在 `source_file` 中的零基序号，`element_index` 是 elem 在该 record 中的零基序号；插件可用三者可靠地重新归组同一底层 BGP record 拆出的元素。
 
-这里的“完整”以 libBGPStream 公开的元素模型为边界。libBGPStream 已经把原始 MRT/BGP 报文拆成元素，并会展开 AS_SEQUENCE；未通过其公开 elem 字段暴露的原始字节、未知 path attribute、large/extended community 等无法从这一层恢复。`annotations.cfg` 是带有借用生命周期的不透明配置指针，因此不会传给插件；`has_rpki_config` 只安全地记录它是否存在。
+这里的“完整”以 libBGPStream 公开的元素模型为边界。libBGPStream 仍会把原始 MRT/BGP 报文解析成
+`bgpstream_elem_t`；字段声明优化的是从 elem 到 `BGPMessage` 的转换和数据构造。未通过公开 elem 字段暴露的
+原始字节、未知 path attribute、large/extended community 等无法从这一层恢复。`annotations.cfg` 是带有
+借用生命周期的不透明配置指针，因此不会传给插件；`has_rpki_config` 只安全地记录它是否存在。
 
 ### C++ 原生下载层
 
@@ -164,6 +174,9 @@
 
   - `name()`
     返回处理器名字，用于汇总输出。
+  - `required_message_fields()`
+    返回插件实际读取的 `BGPMessageFields` 位集合。该方法是必需接口；多个字段用 `|` 组合，不需要任何字段时
+    返回 `BGPMessageFields::None`。
   - `handle_messages(const std::vector<BGPMessage>&)`
     批量处理报文。
     这里采用“批量”而不是“逐条虚函数调用”，目的是降低虚调用开销。
@@ -607,6 +620,10 @@ class MyProcessor : public bgpstream_runner::MessageProcessor {
    public:
     std::string_view name() const override { return "my_processor"; }
 
+    bgpstream_runner::BGPMessageFields required_message_fields() const noexcept override {
+        return bgpstream_runner::BGPMessageFields::None;
+    }
+
     void handle_messages(const std::vector<bgpstream_runner::BGPMessage> &messages) override {
         processed_ += messages.size();
     }
@@ -620,6 +637,13 @@ class MyProcessor : public bgpstream_runner::MessageProcessor {
 };
 
 BGPSTREAM_RUNNER_EXPORT_PROCESSOR(MyProcessor)
+```
+
+上例只使用批次大小，因此声明 `None`。如果处理逻辑读取 `message.type` 和 `message.prefix`，应改为：
+
+```cpp
+return bgpstream_runner::BGPMessageFields::Type |
+       bgpstream_runner::BGPMessageFields::Prefix;
 ```
 
 上面的处理器没有重写并发能力声明，因此 `handle_messages()` 保持串行调用。需要注意，串行只表示不会同时进入插件，并不保证多个解析线程提交批次的先后顺序。如果插件已经自行保护所有会在该函数中读写的共享状态，可以显式开启并发：
@@ -638,7 +662,8 @@ bool requires_strict_chronological_order() const noexcept override { return true
 
 此时框架按照资源的归档起始时间逐文件处理，在每个批次内按 `(BGPMessage.timestamp, BGPMessage.timestamp_microseconds)` 稳定排序，并在整个运行期间校验跨批次、跨文件和跨分片的时间戳不发生倒退。相同时间戳的多条报文可以连续出现。如果源文件出现无法跨批次修正的时间倒退，程序会在把乱序批次交给插件之前终止并报告错误。严格时序模式始终只使用一个解析线程；即使 `supports_concurrent_message_handling()` 同时返回 `true`，也不会并发进入 `handle_messages()`。
 
-`BGPMessage` 和 `MessageProcessor` 都是插件 ABI 的一部分。本次扩展后，旧的插件动态库必须用当前头文件重新编译；加载器会检查宏导出的 API 版本，并对未重编译或版本不一致的插件给出明确错误，而不是继续执行不兼容的二进制代码。
+`BGPMessage` 和 `MessageProcessor` 都是插件 ABI 的一部分。字段声明接口把插件 API 提升到了版本 4，旧插件
+必须实现 `required_message_fields()` 并用当前头文件重新编译；加载器会拒绝版本不一致的动态库。
 
 对应的 `plugins/my_processor/CMakeLists.txt` 可以写成：
 

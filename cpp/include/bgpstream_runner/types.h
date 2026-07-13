@@ -84,6 +84,60 @@ enum class BGPMessageType {
     Unknown,
 };
 
+// Plugins declare the BGPMessage data they consume with this bit mask. Fields
+// not requested by the active plugin are left at their default value instead
+// of being converted or copied from libBGPStream.
+enum class BGPMessageFields : std::uint64_t {
+    None = 0,
+    Type = std::uint64_t{1} << 0,
+    RecordType = std::uint64_t{1} << 1,
+    RecordStatus = std::uint64_t{1} << 2,
+    Timestamp = std::uint64_t{1} << 3,
+    ProjectName = std::uint64_t{1} << 4,
+    CollectorName = std::uint64_t{1} << 5,
+    RouterName = std::uint64_t{1} << 6,
+    RouterIp = std::uint64_t{1} << 7,
+    DumpPosition = std::uint64_t{1} << 8,
+    DumpTimestamp = std::uint64_t{1} << 9,
+    SourceFile = std::uint64_t{1} << 10,
+    RecordIndex = std::uint64_t{1} << 11,
+    ElementIndex = std::uint64_t{1} << 12,
+    OriginatedTimestamp = std::uint64_t{1} << 13,
+    PeerIp = std::uint64_t{1} << 14,
+    PeerAsn = std::uint64_t{1} << 15,
+    Prefix = std::uint64_t{1} << 16,
+    NextHop = std::uint64_t{1} << 17,
+    HasASPath = std::uint64_t{1} << 18,
+    ASPathString = std::uint64_t{1} << 19,
+    ASPathSegments = std::uint64_t{1} << 20,
+    FlattenedAsns = std::uint64_t{1} << 21,
+    OriginAsn = std::uint64_t{1} << 22,
+    HasCommunities = std::uint64_t{1} << 23,
+    Communities = std::uint64_t{1} << 24,
+    Origin = std::uint64_t{1} << 25,
+    Med = std::uint64_t{1} << 26,
+    LocalPref = std::uint64_t{1} << 27,
+    AtomicAggregate = std::uint64_t{1} << 28,
+    Aggregator = std::uint64_t{1} << 29,
+    PeerStates = std::uint64_t{1} << 30,
+    Annotations = std::uint64_t{1} << 31,
+};
+
+constexpr BGPMessageFields operator|(BGPMessageFields left, BGPMessageFields right) noexcept {
+    return static_cast<BGPMessageFields>(static_cast<std::uint64_t>(left) |
+                                         static_cast<std::uint64_t>(right));
+}
+
+constexpr BGPMessageFields &operator|=(BGPMessageFields &left, BGPMessageFields right) noexcept {
+    left = left | right;
+    return left;
+}
+
+constexpr bool has_message_field(BGPMessageFields fields, BGPMessageFields field) noexcept {
+    const auto field_bits = static_cast<std::uint64_t>(field);
+    return (static_cast<std::uint64_t>(fields) & field_bits) == field_bits;
+}
+
 enum class BGPRecordType {
     Update,
     RIB,
@@ -157,9 +211,7 @@ struct BGPAnnotations {
 };
 
 struct BGPMessage {
-    // Element type. Announcement and Withdrawal retain their original enum
-    // values so existing source code continues to behave as before.
-    BGPMessageType type = BGPMessageType::Announcement;
+    BGPMessageType type = BGPMessageType::Unknown;
 
     // Record-level provenance and timing.
     BGPRecordType record_type = BGPRecordType::Unknown;
@@ -184,9 +236,8 @@ struct BGPMessage {
     std::string prefix;
     std::string next_hop;
 
-    // Full path representation plus a structured, lossless representation of
-    // every segment exposed by libBGPStream. `asns` is kept as the legacy
-    // flattened view for existing processors.
+    // Independent string, structured, flattened, and origin views of the AS
+    // path. Only the views requested by the processor are populated.
     bool has_as_path = false;
     std::string as_path;
     std::vector<ASPathSegment> as_path_segments;
