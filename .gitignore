@@ -1,5 +1,6 @@
 bgpdata/
 build/
+build-release/
 .cache/
 config.json
 log/

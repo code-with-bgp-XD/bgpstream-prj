@@ -3,12 +3,13 @@
 set -euo pipefail
 
 DEFAULT_OUTPUT_DIR="bgpdata"
-DEFAULT_BUILD_DIR="build"
+DEFAULT_DEBUG_BUILD_DIR="build"
+DEFAULT_RELEASE_BUILD_DIR="build-release"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 command_name=""
 output_dir_override=""
-build_dir="$DEFAULT_BUILD_DIR"
+build_dir=""
 run_args=()
 download_project=""
 download_collector=""
@@ -20,24 +21,27 @@ download_option_used=false
 
 usage() {
   cat <<'EOF'
-Usage: ./manage.sh <build|run|download|cache-size|cache-clear> [options] [-- program_args...]
+Usage: ./manage.sh <command> [options] [-- program_args...]
 
 Commands:
-  build                      Configure and build the project
-  run                        Configure, build, and run the project executable
-  download                   Download one source and date range into the local cache
+  build                      Configure and build Debug into build/
+  build-release              Configure and build Release into build-release/
+  run                        Configure, build, and run the Debug executable
+  run-release                Configure, build, and run the Release executable
+  download                   Build Debug and download one source/date range
+  download-release           Build Release and download one source/date range
   cache-size                 Show cached file count and total size
   cache-clear                Delete all cached files under output_dir
 
 Options:
-  --build-dir PATH           Override the build directory for build/run/download
+  --build-dir PATH           Override the directory used by build/run/download commands
   --output-dir PATH          Override output_dir for cache-size/cache-clear only
-  --project NAME             Temporarily override cache.project for download
-  --collector NAME           Temporarily override cache.collector for download
-  --start-date YYYY-MM-DD    Temporarily override cache.start_date for download
-  --end-date YYYY-MM-DD      Temporarily override cache.end_date for download
-  --download-workers N       Override download concurrency for download
-  --limit N                  Limit matched files for download (for testing)
+  --project NAME             Temporarily override cache.project for download commands
+  --collector NAME           Temporarily override cache.collector for download commands
+  --start-date YYYY-MM-DD    Temporarily override cache.start_date for download commands
+  --end-date YYYY-MM-DD      Temporarily override cache.end_date for download commands
+  --download-workers N       Override concurrency for download commands
+  --limit N                  Limit matched files for download commands (for testing)
   --help, -h                 Show this help text
 EOF
 }
@@ -110,19 +114,29 @@ format_bytes() {
 }
 
 run_build() {
+  local build_type="$1"
   local resolved_build_dir
   resolved_build_dir="$(resolve_build_dir)"
 
-  cmake -S "$repo_root" -B "$resolved_build_dir"
+  cmake -S "$repo_root" -B "$resolved_build_dir" -DCMAKE_BUILD_TYPE="$build_type"
   cmake --build "$resolved_build_dir"
 }
 
 resolve_build_dir() {
   local resolved_build_dir
-  if [[ "$build_dir" = /* ]]; then
-    resolved_build_dir="$build_dir"
+  local selected_build_dir="$build_dir"
+  if [ -z "$selected_build_dir" ]; then
+    if [[ "$command_name" == *-release ]]; then
+      selected_build_dir="$DEFAULT_RELEASE_BUILD_DIR"
+    else
+      selected_build_dir="$DEFAULT_DEBUG_BUILD_DIR"
+    fi
+  fi
+
+  if [[ "$selected_build_dir" = /* ]]; then
+    resolved_build_dir="$selected_build_dir"
   else
-    resolved_build_dir="$repo_root/$build_dir"
+    resolved_build_dir="$repo_root/$selected_build_dir"
   fi
 
   printf "%s\n" "$resolved_build_dir"
@@ -212,7 +226,7 @@ run_cache_clear() {
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    build|run|download|cache-size|cache-clear)
+    build|build-release|run|run-release|download|download-release|cache-size|cache-clear)
       if [ -n "$command_name" ]; then
         echo "Only one command may be provided." >&2
         usage >&2
@@ -313,27 +327,40 @@ if [ -z "$command_name" ]; then
   exit 1
 fi
 
-if [ "$command_name" != "download" ] && [ "$download_option_used" = true ]; then
-  echo "Download source/date options may only be used with the download command." >&2
+if [[ "$command_name" != "download" && "$command_name" != "download-release" ]] &&
+  [ "$download_option_used" = true ]; then
+  echo "Download source/date options may only be used with download or download-release." >&2
   usage >&2
   exit 1
 fi
 
-if [ "$command_name" = "download" ] && [ -n "$output_dir_override" ]; then
+if [[ "$command_name" == "download" || "$command_name" == "download-release" ]] &&
+  [ -n "$output_dir_override" ]; then
   echo "The download directory is fixed by cache.output_dir in config.json." >&2
   exit 1
 fi
 
 case "$command_name" in
   build)
-    run_build
+    run_build Debug
+    ;;
+  build-release)
+    run_build Release
     ;;
   run)
-    run_build
+    run_build Debug
+    run_program
+    ;;
+  run-release)
+    run_build Release
     run_program
     ;;
   download)
-    run_build
+    run_build Debug
+    run_download
+    ;;
+  download-release)
+    run_build Release
     run_download
     ;;
   cache-size)

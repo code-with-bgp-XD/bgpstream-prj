@@ -330,8 +330,13 @@ cmake -S . -B build \
 推荐构建命令：
 
 ```bash
-cmake -S . -B build
-cmake --build build
+./manage.sh build
+```
+
+该命令会明确使用 Debug 模式并输出到 `build/`。Release 构建使用独立目录：
+
+```bash
+./manage.sh build-release
 ```
 
 构建后主要产物：
@@ -339,6 +344,7 @@ cmake --build build
 - `build/bgpstream_analyzer`
 - `build/bgpstream_processor_plugins.tsv`
 - `build/compile_commands.json`
+- `build-release/bgpstream_analyzer`（Release）
 
 ### VS Code 一键构建、运行和调试
 
@@ -381,8 +387,11 @@ cp config.example.json config.json
 
 ```bash
 ./manage.sh build
+./manage.sh build-release
 ./manage.sh run
+./manage.sh run-release
 ./manage.sh download
+./manage.sh download-release
 ./manage.sh cache-size
 ./manage.sh cache-clear
 ```
@@ -390,19 +399,32 @@ cp config.example.json config.json
 其中：
 
 - `build`
-  等价于执行 `cmake -S . -B build && cmake --build build`。
+  使用 `-DCMAKE_BUILD_TYPE=Debug` 配置并构建到 `build/`。
+- `build-release`
+  使用 `-DCMAKE_BUILD_TYPE=Release` 配置并构建到独立的 `build-release/`。
 - `run`
-  先执行一次构建，再启动 `build/bgpstream_analyzer`。
+  先执行一次 Debug 构建，再启动 `build/bgpstream_analyzer`。
+- `run-release`
+  先执行一次 Release 构建，再启动 `build-release/bgpstream_analyzer`。
 - `download`
-  先构建项目，再按 `config.json` 的 `cache` 区块把指定 `project + collector` 和日期范围内的 update 文件下载到固定缓存目录；只下载数据，不加载处理器插件，也不执行数据分析。已经完整缓存的文件会直接复用。网络中断或进程停止后会保留 `.part`，再次运行时使用 HTTP Range 从已有字节继续；只有确认分片损坏、无法续传时才删除重下。结束日期为包含式。
+  先执行一次 Debug 构建，再按 `config.json` 的 `cache` 区块下载数据。
+- `download-release`
+  与 `download` 行为相同，但使用 `build-release/` 中的 Release 可执行文件。
 - `cache-size`
   读取根目录 `config.json` 里的 `cache.output_dir`，统计当前缓存文件数量和总大小。
 - `cache-clear`
   读取根目录 `config.json` 里的 `cache.output_dir`，删除全部缓存文件。
 
-`cache.output_dir` 是下载和分析共用的唯一缓存根目录：相对路径固定以仓库根目录为基准，`download` 命令不能临时覆盖该目录，分析程序也始终从这里查找数据。这样只要 `analysis.project + analysis.collector` 与已下载数据一致、分析日期位于已下载范围内，后续分析就会直接命中缓存。
+`download` 和 `download-release` 都只下载数据，不加载处理器插件，也不执行数据分析。已经完整缓存的文件会直接
+复用。网络中断或进程停止后会保留 `.part`，再次运行时使用 HTTP Range 从已有字节继续；只有确认分片损坏、
+无法续传时才删除重下。结束日期为包含式。
 
-`build`、`run` 和 `download` 支持 `--build-dir PATH` 指定构建目录。`download` 还支持用命令行临时覆盖 `cache` 区块的数据源、日期、并发数和文件数限制，例如：
+`cache.output_dir` 是下载和分析共用的唯一缓存根目录：相对路径固定以仓库根目录为基准，两个 download 命令
+都不能临时覆盖该目录，分析程序也始终从这里查找数据。这样只要 `analysis.project + analysis.collector` 与已下载
+数据一致、分析日期位于已下载范围内，后续分析就会直接命中缓存。
+
+所有 build、run 和 download 命令都支持 `--build-dir PATH` 指定构建目录。`download` 和
+`download-release` 还支持用命令行临时覆盖 `cache` 区块的数据源、日期、并发数和文件数限制，例如：
 
 ```bash
 ./manage.sh download \
