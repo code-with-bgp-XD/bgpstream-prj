@@ -348,7 +348,7 @@ cmake -S . -B build \
 
 ### VS Code 一键构建、运行和调试
 
-仓库内的 `.vscode/` 已包含 Debug 模式所需配置。用 VS Code 打开仓库根目录后，按提示安装推荐的 C/C++ 和 CMake Tools 扩展，并确认系统中可以执行 `gdb`。程序运行前还需要存在根目录 `config.json`；首次使用时可由模板复制：
+仓库内的 `.vscode/` 已包含 Debug 和 Release 模式所需配置。用 VS Code 打开仓库根目录后，按提示安装推荐的 C/C++ 和 CMake Tools 扩展，并确认系统中可以执行 `gdb`。程序运行前还需要存在根目录 `config.json`；首次使用时可由模板复制：
 
 ```bash
 cp config.example.json config.json
@@ -356,8 +356,11 @@ cp config.example.json config.json
 
 常用入口如下：
 
+- CMake Tools 的 Build/Run 按钮：默认配置、构建并运行 `build-release/` 中的 Release 版本。
 - `Ctrl+Shift+B`：执行默认任务 `CMake: 构建 (Debug)`，自动完成 CMake 配置和构建。
 - `终端 -> 运行任务 -> 运行: bgpstream_analyzer`：自动构建后直接运行。
+- `终端 -> 运行任务 -> CMake: 构建 (Release)`：自动配置并构建到 `build-release/`。
+- `终端 -> 运行任务 -> 运行: bgpstream_analyzer (Release)`：自动构建 Release 版本后直接运行。
 - 在“运行和调试”面板选择 `调试: bgpstream_analyzer (GDB)`，按 `F5`：自动构建后启动 GDB 调试。
 - 选择同一调试配置后按 `Ctrl+F5`：自动构建后运行，但不附加调试器。
 

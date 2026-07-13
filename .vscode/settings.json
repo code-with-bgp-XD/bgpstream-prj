@@ -1,9 +1,9 @@
 {
   "cmake.sourceDirectory": "${workspaceFolder}",
-  "cmake.buildDirectory": "${workspaceFolder}/build",
+  "cmake.buildDirectory": "${workspaceFolder}/build-release",
   "cmake.configureSettings": {
-    "CMAKE_BUILD_TYPE": "Debug",
+    "CMAKE_BUILD_TYPE": "Release",
     "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
   },
-  "C_Cpp.default.compileCommands": "${workspaceFolder}/build/compile_commands.json"
+  "C_Cpp.default.compileCommands": "${workspaceFolder}/build-release/compile_commands.json"
 }
