@@ -52,6 +52,7 @@ class ChunkEngine {
     Config config_;
     DownloadClient download_client_;
     MessageProcessor &processor_;
+    const bool processor_supports_concurrent_message_handling_;
     mutable std::mutex record_file_mutex_;
     std::filesystem::path record_file_path_;
     mutable std::mutex stats_mutex_;

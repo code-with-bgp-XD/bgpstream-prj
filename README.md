@@ -167,6 +167,9 @@
   - `handle_messages(const std::vector<BGPMessage>&)`
     批量处理报文。
     这里采用“批量”而不是“逐条虚函数调用”，目的是降低虚调用开销。
+  - `supports_concurrent_message_handling()`
+    声明同一个处理器实例是否允许多个解析线程同时进入 `handle_messages()`。
+    默认返回 `false`，因此未显式开启的插件仍由框架串行调用。
   - `finalize()`
     在整个时间范围内的文件都处理完成后调用一次，适合做最终汇总或收尾处理。
     默认实现为空，不要求每个插件都重写。
@@ -498,7 +501,7 @@ cp config.example.json config.json
   下载阶段的并发线程数。值越大，单分片下载速度通常越快，但也会增加网络和上游服务压力。
 
 - `analysis.parser_workers`
-  C++ 中层遍历本地 MRT 文件时的并发线程数。通常对应“同时解析多少个文件”。注意，增加这个线程数会显著增加内存占用，请不要设置为太大的值。
+  C++ 中层遍历本地 MRT 文件时的并发线程数。通常对应“同时解析多少个文件”。当插件的 `supports_concurrent_message_handling()` 返回 `true` 时，这些线程也可以同时进入同一个插件实例的 `handle_messages()`；否则框架仍会把插件调用串行化。注意，增加这个线程数会显著增加内存占用，请不要设置为太大的值。
 
 - `analysis.message_batch_size`
   中层交给处理器的单批报文数量。中层会先把报文聚成一个 `std::vector<BGPMessage>`，再调用一次处理器的 `handle_messages()`。
@@ -538,6 +541,7 @@ cp config.example.json config.json
 
 - `processed_chunks`
 - `files_used`
+- `processor_concurrent_message_handling`
 - `visited_messages`
 - `rib_messages`
 - `announcement_messages`
@@ -592,7 +596,15 @@ class MyProcessor : public bgpstream_runner::MessageProcessor {
 BGPSTREAM_RUNNER_EXPORT_PROCESSOR(MyProcessor)
 ```
 
-`BGPMessage` 是插件 ABI 的一部分。本次扩展后，旧的插件动态库必须用当前头文件重新编译；加载器会检查宏导出的 API 版本，并对未重编译或版本不一致的插件给出明确错误，而不是继续执行不兼容的二进制代码。
+上面的处理器没有重写并发能力声明，因此 `handle_messages()` 保持串行调用。如果插件已经自行保护所有会在该函数中读写的共享状态，可以显式开启并发：
+
+```cpp
+bool supports_concurrent_message_handling() const noexcept override { return true; }
+```
+
+开启后，框架不再为这个处理器实例加全局互斥锁；并发调用数最多受 `analysis.parser_workers` 和当前分片文件数限制，调用及完成顺序不作保证。插件必须自行使用原子变量、互斥锁、线程局部状态等方式避免数据竞争。`finalize()` 和 `print_summary()` 只会在当前解析线程全部结束后调用，不会与 `handle_messages()` 并发执行。仓库里的 `example_announcement_counter_plugin` 展示了使用原子计数器安全开启该选项的方式。
+
+`BGPMessage` 和 `MessageProcessor` 都是插件 ABI 的一部分。本次扩展后，旧的插件动态库必须用当前头文件重新编译；加载器会检查宏导出的 API 版本，并对未重编译或版本不一致的插件给出明确错误，而不是继续执行不兼容的二进制代码。
 
 对应的 `plugins/my_processor/CMakeLists.txt` 可以写成：
 

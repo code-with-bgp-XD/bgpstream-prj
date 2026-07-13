@@ -404,6 +404,7 @@ ChunkEngine::ChunkEngine(Config config, MessageProcessor &processor)
     : config_(std::move(config)),
       download_client_(config_),
       processor_(processor),
+      processor_supports_concurrent_message_handling_(processor.supports_concurrent_message_handling()),
       record_file_path_(make_record_file_path()) {}
 
 RangeProcessingStats ChunkEngine::run() {
@@ -494,6 +495,8 @@ void ChunkEngine::print_summary(std::ostream &out, const RangeProcessingStats &s
     out << "data_dir: " << std::filesystem::absolute(data_dir).string() << '\n';
     out << "download_workers: " << config_.download_workers << '\n';
     out << "parser_workers: " << config_.parser_workers << '\n';
+    out << "processor_concurrent_message_handling: "
+        << (processor_supports_concurrent_message_handling_ ? "true" : "false") << '\n';
     out << "message_batch_size: " << config_.message_batch_size << '\n';
     out << "chunk_size: " << config_.chunk_size << '\n';
     out << "chunk_unit: " << chunk_unit_to_string(config_.chunk_unit) << '\n';
@@ -552,6 +555,8 @@ void ChunkEngine::process_files(const std::vector<std::filesystem::path> &files,
     try {
         std::atomic<std::size_t> next_file_index{0};
         std::mutex processor_mutex;
+        std::mutex *const processor_mutex_ptr =
+            processor_supports_concurrent_message_handling_ ? nullptr : &processor_mutex;
         std::mutex parse_failures_mutex;
         std::mutex fatal_error_mutex;
         std::exception_ptr fatal_error;
@@ -572,7 +577,7 @@ void ChunkEngine::process_files(const std::vector<std::filesystem::path> &files,
                         const auto &file_path = files[file_index];
                         try {
                             const FileTraversalStats file_stats =
-                                traverse_single_file(file_path, chunk, &processor_mutex);
+                                traverse_single_file(file_path, chunk, processor_mutex_ptr);
                             record_processed_file(file_stats);
                         } catch (const ParseFailure &exc) {
                             record_skipped_parse_file();
@@ -654,8 +659,12 @@ ChunkEngine::FileTraversalStats ChunkEngine::traverse_single_file(const std::fil
             if (message_batch.empty()) {
                 return;
             }
-            std::lock_guard<std::mutex> lock(*processor_mutex);
-            processor_.handle_messages(message_batch);
+            if (processor_mutex == nullptr) {
+                processor_.handle_messages(message_batch);
+            } else {
+                std::lock_guard<std::mutex> lock(*processor_mutex);
+                processor_.handle_messages(message_batch);
+            }
             message_batch.clear();
         };
 
