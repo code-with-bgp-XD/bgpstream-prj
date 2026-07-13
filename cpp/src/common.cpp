@@ -1,9 +1,12 @@
 #include "bgpstream_runner/common.h"
 
-#include <curses.h>
+#include <signal.h>
+#include <sys/ioctl.h>
+#include <term.h>
 #include <unistd.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdlib>
 #include <ctime>
 #include <iomanip>
@@ -70,26 +73,123 @@ std::filesystem::path repo_config_path() {
     return std::filesystem::path(BGPSTREAM_SOURCE_DIR) / kDefaultConfigPath;
 }
 
+thread_local std::string *terminal_capability_output = nullptr;
+
+int append_terminal_capability_character(int character) {
+    if (terminal_capability_output != nullptr) {
+        terminal_capability_output->push_back(static_cast<char>(character));
+    }
+    return character;
+}
+
+bool is_valid_terminal_capability(const char *capability) {
+    return capability != nullptr && capability != reinterpret_cast<const char *>(-1);
+}
+
+std::string terminal_capability(const char *name) {
+    const char *capability = tigetstr(name);
+    return is_valid_terminal_capability(capability) ? capability : "";
+}
+
+void append_terminal_capability(std::string *output, const std::string &capability) {
+    if (capability.empty()) {
+        return;
+    }
+
+    std::string *const previous_output = terminal_capability_output;
+    terminal_capability_output = output;
+    tputs(capability.c_str(), 1, append_terminal_capability_character);
+    terminal_capability_output = previous_output;
+}
+
+void append_terminal_capability(std::string *output, const std::string &capability, int first_parameter,
+                                int second_parameter) {
+    if (capability.empty()) {
+        return;
+    }
+
+    const char *expanded = tparm(capability.c_str(), static_cast<long>(first_parameter),
+                                 static_cast<long>(second_parameter));
+    if (is_valid_terminal_capability(expanded)) {
+        append_terminal_capability(output, expanded);
+    }
+}
+
+void write_terminal_output(std::string_view output) {
+    std::size_t written = 0;
+    while (written < output.size()) {
+        const ssize_t result = ::write(STDOUT_FILENO, output.data() + written, output.size() - written);
+        if (result > 0) {
+            written += static_cast<std::size_t>(result);
+        } else if (result < 0 && errno == EINTR) {
+            continue;
+        } else {
+            break;
+        }
+    }
+}
+
+bool query_terminal_size(int *row_count, int *column_count) {
+    winsize size{};
+    if (::ioctl(STDOUT_FILENO, TIOCGWINSZ, &size) == 0 && size.ws_row >= 2 && size.ws_col >= 2) {
+        *row_count = static_cast<int>(size.ws_row);
+        *column_count = static_cast<int>(size.ws_col);
+        return true;
+    }
+
+    const int terminfo_rows = tigetnum("lines");
+    const int terminfo_columns = tigetnum("cols");
+    if (terminfo_rows < 2 || terminfo_columns < 2) {
+        return false;
+    }
+
+    *row_count = terminfo_rows;
+    *column_count = terminfo_columns;
+    return true;
+}
+
+void restore_terminal_on_signal(int signal_number) {
+    static constexpr char reset_terminal[] = "\x1b[r\x1b[999;1H\x1b[2K\r\n";
+    const ssize_t ignored = ::write(STDOUT_FILENO, reset_terminal, sizeof(reset_terminal) - 1);
+    (void)ignored;
+
+    struct sigaction default_action {};
+    default_action.sa_handler = SIG_DFL;
+    sigemptyset(&default_action.sa_mask);
+    sigaction(signal_number, &default_action, nullptr);
+    if (::kill(::getpid(), signal_number) != 0) {
+        _exit(128 + signal_number);
+    }
+}
+
 }  // namespace
+
+struct FileProgressDisplay::TerminalState {
+    struct SignalHandlerRegistration {
+        int signal_number = 0;
+        struct sigaction previous_action {};
+    };
+
+    TERMINAL *terminfo_terminal = nullptr;
+    int row_count = 0;
+    int column_count = 0;
+    std::string cap_cursor_address;
+    std::string cap_change_scroll_region;
+    std::string cap_save_cursor;
+    std::string cap_restore_cursor;
+    std::string cap_clear_to_end_of_line;
+    std::string cap_enter_bold_mode;
+    std::string cap_exit_attribute_mode;
+    std::vector<SignalHandlerRegistration> signal_handlers;
+};
 
 FileProgressDisplay::FileProgressDisplay(std::size_t total_files, std::uint64_t total_bytes, std::string phase)
     : total_files_(total_files),
       total_bytes_(total_bytes),
       phase_(std::move(phase)),
       started_at_(std::chrono::steady_clock::now()) {
-    const char *term = std::getenv("TERM");
-    use_curses_ = (::isatty(STDOUT_FILENO) == 1 && term != nullptr && std::string_view(term) != "dumb");
-
-    if (use_curses_) {
-        initscr();
-        cbreak();
-        noecho();
-        curs_set(0);
-        scrollok(stdscr, FALSE);
-        render_locked();
-    } else {
-        render_locked();
-    }
+    initialize_terminal_locked();
+    render_locked();
 }
 
 FileProgressDisplay::~FileProgressDisplay() { close(); }
@@ -139,17 +239,139 @@ std::string FileProgressDisplay::build_line_locked() const {
     return output.str();
 }
 
+bool FileProgressDisplay::initialize_terminal_locked() {
+    const char *term = std::getenv("TERM");
+    if (::isatty(STDOUT_FILENO) != 1 || term == nullptr || std::string_view(term) == "dumb") {
+        return false;
+    }
+
+    std::cout << std::flush;
+    std::cerr << std::flush;
+
+    int setup_error = 0;
+    if (setupterm(nullptr, STDOUT_FILENO, &setup_error) != 0) {
+        return false;
+    }
+
+    auto state = std::make_unique<TerminalState>();
+    state->terminfo_terminal = cur_term;
+    state->cap_cursor_address = terminal_capability("cup");
+    state->cap_change_scroll_region = terminal_capability("csr");
+    state->cap_save_cursor = terminal_capability("sc");
+    state->cap_restore_cursor = terminal_capability("rc");
+    state->cap_clear_to_end_of_line = terminal_capability("el");
+    state->cap_enter_bold_mode = terminal_capability("bold");
+    state->cap_exit_attribute_mode = terminal_capability("sgr0");
+
+    if (state->cap_cursor_address.empty() || state->cap_change_scroll_region.empty() ||
+        state->cap_save_cursor.empty() || state->cap_restore_cursor.empty() ||
+        state->cap_clear_to_end_of_line.empty() ||
+        !query_terminal_size(&state->row_count, &state->column_count)) {
+        del_curterm(state->terminfo_terminal);
+        return false;
+    }
+
+    static constexpr int kTerminationSignals[] = {SIGINT, SIGTERM, SIGHUP, SIGQUIT};
+    state->signal_handlers.reserve(4);
+    for (const int signal_number : kTerminationSignals) {
+        struct sigaction previous_action {};
+        if (sigaction(signal_number, nullptr, &previous_action) != 0 || previous_action.sa_handler != SIG_DFL) {
+            continue;
+        }
+
+        struct sigaction terminal_action {};
+        terminal_action.sa_handler = restore_terminal_on_signal;
+        sigemptyset(&terminal_action.sa_mask);
+        if (sigaction(signal_number, &terminal_action, nullptr) == 0) {
+            state->signal_handlers.push_back({signal_number, previous_action});
+        }
+    }
+
+    // Keep the terminal's main screen active. The upper region remains the normal
+    // stdout/stderr log area while the final row is reserved for progress.
+    std::string output;
+    append_terminal_capability(&output, state->cap_change_scroll_region, 0, state->row_count - 2);
+    append_terminal_capability(&output, state->cap_cursor_address, state->row_count - 2, 0);
+    write_terminal_output(output);
+    terminal_ = std::move(state);
+    return true;
+}
+
+bool FileProgressDisplay::update_terminal_size_locked() {
+    if (terminal_ == nullptr) {
+        return false;
+    }
+
+    int row_count = 0;
+    int column_count = 0;
+    if (!query_terminal_size(&row_count, &column_count)) {
+        return false;
+    }
+    if (row_count == terminal_->row_count && column_count == terminal_->column_count) {
+        return true;
+    }
+
+    std::string output;
+    if (terminal_->row_count <= row_count) {
+        append_terminal_capability(&output, terminal_->cap_cursor_address, terminal_->row_count - 1, 0);
+        append_terminal_capability(&output, terminal_->cap_clear_to_end_of_line);
+    }
+    append_terminal_capability(&output, terminal_->cap_change_scroll_region, 0, row_count - 2);
+    append_terminal_capability(&output, terminal_->cap_cursor_address, row_count - 2, 0);
+    write_terminal_output(output);
+
+    terminal_->row_count = row_count;
+    terminal_->column_count = column_count;
+    return true;
+}
+
+void FileProgressDisplay::render_terminal_locked(const std::string &line) {
+    update_terminal_size_locked();
+
+    const std::size_t maximum_width = static_cast<std::size_t>(std::max(1, terminal_->column_count - 1));
+    const std::string_view visible_line(line.data(), std::min(line.size(), maximum_width));
+
+    // Restore the log cursor after drawing so ordinary stdout/stderr writes keep
+    // scrolling above the progress row.
+    std::string output;
+    append_terminal_capability(&output, terminal_->cap_save_cursor);
+    append_terminal_capability(&output, terminal_->cap_cursor_address, terminal_->row_count - 1, 0);
+    if (!terminal_->cap_enter_bold_mode.empty() && !terminal_->cap_exit_attribute_mode.empty()) {
+        append_terminal_capability(&output, terminal_->cap_enter_bold_mode);
+    }
+    output.append(visible_line);
+    if (!terminal_->cap_enter_bold_mode.empty() && !terminal_->cap_exit_attribute_mode.empty()) {
+        append_terminal_capability(&output, terminal_->cap_exit_attribute_mode);
+    }
+    append_terminal_capability(&output, terminal_->cap_clear_to_end_of_line);
+    append_terminal_capability(&output, terminal_->cap_restore_cursor);
+    write_terminal_output(output);
+}
+
+void FileProgressDisplay::close_terminal_locked() {
+    update_terminal_size_locked();
+    render_terminal_locked(last_line_);
+
+    std::string output;
+    append_terminal_capability(&output, terminal_->cap_change_scroll_region, 0, terminal_->row_count - 1);
+    append_terminal_capability(&output, terminal_->cap_cursor_address, terminal_->row_count - 1, 0);
+    output += "\r\n";
+    write_terminal_output(output);
+    for (auto registration = terminal_->signal_handlers.rbegin();
+         registration != terminal_->signal_handlers.rend(); ++registration) {
+        sigaction(registration->signal_number, &registration->previous_action, nullptr);
+    }
+    TERMINAL *const terminfo_terminal = terminal_->terminfo_terminal;
+    terminal_.reset();
+    del_curterm(terminfo_terminal);
+}
+
 void FileProgressDisplay::render_locked() {
     const std::string line = build_line_locked();
     last_line_ = line;
 
-    if (use_curses_ && !closed_) {
-        erase();
-        attron(A_BOLD);
-        mvaddnstr(0, 0, line.c_str(), COLS > 0 ? COLS - 1 : static_cast<int>(line.size()));
-        attroff(A_BOLD);
-        clrtoeol();
-        refresh();
+    if (terminal_ != nullptr && !closed_) {
+        render_terminal_locked(line);
         return;
     }
 
@@ -168,9 +390,8 @@ void FileProgressDisplay::close_locked() {
     }
     closed_ = true;
 
-    if (use_curses_) {
-        endwin();
-        std::cout << last_line_ << '\n';
+    if (terminal_ != nullptr) {
+        close_terminal_locked();
         return;
     }
 

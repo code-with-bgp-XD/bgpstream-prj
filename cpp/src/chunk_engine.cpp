@@ -11,6 +11,7 @@ extern "C" {
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -494,6 +495,23 @@ RangeProcessingStats ChunkEngine::run() {
     last_delivered_message_timestamp_.reset();
     const ClosedDateRange range = parse_closed_date_range(config_);
     const std::vector<ClosedDateRange> chunks = split_range_by_chunks(range, config_.chunk_size, config_.chunk_unit);
+
+    struct PlannedChunk {
+        ClosedDateRange range;
+        std::string label;
+        int limit_override = -1;
+        std::vector<DownloadTarget> targets;
+    };
+
+    if (config_.log_phase_transitions) {
+        std::cout << "plan phase " << format_range_label(range) << std::endl;
+    }
+
+    std::vector<PlannedChunk> planned_chunks;
+    planned_chunks.reserve(chunks.size());
+    std::size_t total_files = 0;
+    std::uint64_t total_bytes = 0;
+    bool all_file_sizes_known = true;
     int remaining_limit = config_.limit;
 
     for (const ClosedDateRange &chunk : chunks) {
@@ -501,15 +519,57 @@ RangeProcessingStats ChunkEngine::run() {
             break;
         }
 
+        PlannedChunk planned_chunk;
+        planned_chunk.range = chunk;
+        planned_chunk.label = format_range_label(chunk);
+        planned_chunk.limit_override = remaining_limit;
+        planned_chunk.targets = download_client_.collect_targets(chunk, remaining_limit);
+
+        // Boundary resources can be traversed once per adjacent chunk because each
+        // traversal applies a different time filter, so count every planned target.
+        total_files += planned_chunk.targets.size();
+        for (const DownloadTarget &target : planned_chunk.targets) {
+            std::uint64_t file_size = 0;
+            if (std::filesystem::exists(target.local_path)) {
+                file_size = safe_file_size(target.local_path);
+            } else if (std::filesystem::exists(target.destination_path)) {
+                file_size = safe_file_size(target.destination_path);
+            } else {
+                file_size = target.expected_size_bytes;
+            }
+
+            if (file_size == 0) {
+                all_file_sizes_known = false;
+            } else {
+                total_bytes += file_size;
+            }
+        }
+
+        if (remaining_limit > 0) {
+            remaining_limit -= static_cast<int>(planned_chunk.targets.size());
+            if (remaining_limit < 0) {
+                remaining_limit = 0;
+            }
+        }
+        planned_chunks.push_back(std::move(planned_chunk));
+    }
+
+    std::unique_ptr<FileProgressDisplay> progress;
+    if (total_files > 0) {
+        progress = std::make_unique<FileProgressDisplay>(total_files, all_file_sizes_known ? total_bytes : 0);
+    }
+
+    for (const PlannedChunk &planned_chunk : planned_chunks) {
+        const ClosedDateRange &chunk = planned_chunk.range;
+        const std::string &chunk_label = planned_chunk.label;
+        const std::vector<DownloadTarget> &targets = planned_chunk.targets;
+
         increment_chunk_count();
-        const std::string chunk_label = format_range_label(chunk);
-        std::vector<DownloadTarget> targets;
 
         try {
             if (config_.log_phase_transitions) {
                 std::cout << "download phase " << chunk_label << std::endl;
             }
-            targets = download_client_.collect_targets(chunk, remaining_limit);
             if (targets.empty()) {
                 const RangeProcessingStats stats = current_stats();
                 if (config_.log_chunk_summary) {
@@ -522,18 +582,23 @@ RangeProcessingStats ChunkEngine::run() {
             std::vector<std::filesystem::path> existing_files = existing_target_files(targets);
             if (existing_files.size() != targets.size()) {
                 evict_cache_if_needed(targets);
-                download_client_.download_range(chunk, remaining_limit);
+                download_client_.download_range(chunk, planned_chunk.limit_override, false);
                 existing_files = existing_target_files(targets);
             } else if (config_.log_phase_transitions) {
                 std::cout << "skip remote download " << chunk_label
                           << " because all target files are already cached locally" << std::endl;
             }
 
+            const std::size_t unavailable_files = targets.size() - existing_files.size();
+            if (unavailable_files > 0) {
+                progress->mark_batch_completed(unavailable_files, 0);
+            }
+
             if (!existing_files.empty()) {
                 if (config_.log_phase_transitions) {
                     std::cout << "process phase " << chunk_label << std::endl;
                 }
-                process_files(existing_files, chunk);
+                process_files(existing_files, chunk, *progress);
             } else {
                 if (config_.log_phase_transitions) {
                     std::cout << "skip process phase " << chunk_label << " because no local files are available"
@@ -549,15 +614,11 @@ RangeProcessingStats ChunkEngine::run() {
         } catch (...) {
             throw;
         }
-
-        if (remaining_limit > 0) {
-            remaining_limit -= static_cast<int>(targets.size());
-            if (remaining_limit < 0) {
-                remaining_limit = 0;
-            }
-        }
     }
 
+    if (progress != nullptr) {
+        progress->finish();
+    }
     processor_.finalize();
     return current_stats();
 }
@@ -628,12 +689,12 @@ std::filesystem::path ChunkEngine::write_record_file(const RangeProcessingStats 
     return record_file_path_;
 }
 
-void ChunkEngine::process_files(const std::vector<std::filesystem::path> &files, const ClosedDateRange &chunk) {
+void ChunkEngine::process_files(const std::vector<std::filesystem::path> &files, const ClosedDateRange &chunk,
+                                FileProgressDisplay &progress) {
     if (files.empty()) {
         return;
     }
 
-    FileProgressDisplay progress(files.size(), total_file_bytes(files));
     // `files` preserves the resource list's initial-time ordering. A single
     // worker keeps that order across files when strict delivery is requested.
     const std::size_t worker_count = processor_requires_strict_chronological_order_
@@ -693,12 +754,10 @@ void ChunkEngine::process_files(const std::vector<std::filesystem::path> &files,
             std::rethrow_exception(fatal_error);
         }
 
-        progress.finish();
         for (const auto &message : parse_failures) {
             std::cerr << message << '\n';
         }
     } catch (...) {
-        progress.close();
         throw;
     }
 }
@@ -918,6 +977,9 @@ std::vector<std::filesystem::path> ChunkEngine::existing_target_files(const std:
     for (const auto &target : targets) {
         if (std::filesystem::exists(target.local_path)) {
             existing_files.push_back(target.local_path);
+        } else if (target.local_path != target.destination_path &&
+                   std::filesystem::exists(target.destination_path)) {
+            existing_files.push_back(target.destination_path);
         }
     }
     return existing_files;

@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -24,7 +25,13 @@ class FileProgressDisplay {
     void close();
 
    private:
+    struct TerminalState;
+
     std::string build_line_locked() const;
+    bool initialize_terminal_locked();
+    bool update_terminal_size_locked();
+    void render_terminal_locked(const std::string &line);
+    void close_terminal_locked();
     void render_locked();
     void close_locked();
 
@@ -37,7 +44,7 @@ class FileProgressDisplay {
     std::uint64_t completed_bytes_ = 0;
     std::size_t last_rendered_width_ = 0;
     std::string last_line_;
-    bool use_curses_ = false;
+    std::unique_ptr<TerminalState> terminal_;
     bool closed_ = false;
 };
 

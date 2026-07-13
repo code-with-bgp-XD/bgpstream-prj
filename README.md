@@ -104,7 +104,7 @@
   - 参数解析
   - 时间范围切片
   - 文件大小统计
-  - 进度条显示
+  - 进度条显示（整次任务共用一条总进度，交互式终端中固定在底行，运行日志在上方正常滚动）
 
 - `cpp/include/bgpstream_runner/config_file.h`
   `cpp/src/config_file.cpp`
@@ -586,7 +586,7 @@ cp config.example.json config.json
   文件数量限制。`analysis.limit` 限制一次分析最多处理的匹配文件数，`cache.limit` 限制一次预下载最多下载的匹配文件数。`-1` 表示不限制，正整数通常用于测试。
 
 - `analysis.log_phase_transitions`
-  是否输出 `download phase`、`process phase`、`cache eviction` 这类阶段切换日志。
+  是否输出 `plan phase`、`download phase`、`process phase`、`cache eviction` 这类阶段切换日志。
 
 - `analysis.log_chunk_summary`
   是否在每个分片处理完成后输出一次当前累计统计。

@@ -16,6 +16,8 @@
 
 namespace bgpstream_runner {
 
+class FileProgressDisplay;
+
 class ChunkEngine {
    public:
     ChunkEngine(Config config, MessageProcessor &processor);
@@ -43,7 +45,8 @@ class ChunkEngine {
 
     using MessageTimestamp = std::pair<std::time_t, std::uint32_t>;
 
-    void process_files(const std::vector<std::filesystem::path> &files, const ClosedDateRange &chunk);
+    void process_files(const std::vector<std::filesystem::path> &files, const ClosedDateRange &chunk,
+                       FileProgressDisplay &progress);
     FileTraversalStats traverse_single_file(const std::filesystem::path &file_path, const ClosedDateRange &chunk,
                                             std::mutex *processor_mutex);
     void dispatch_message_batch(std::vector<BGPMessage> &messages, std::mutex *processor_mutex);

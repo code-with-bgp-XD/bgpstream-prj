@@ -993,7 +993,9 @@ std::vector<FailedDownload> run_download_round(std::vector<Resource> *resources,
                         std::lock_guard<std::mutex> lock(completed_mutex);
                         if (!completed_resources->at(resource_index)) {
                             completed_resources->at(resource_index) = true;
-                            progress->mark_batch_completed(1, downloaded_size);
+                            if (progress != nullptr) {
+                                progress->mark_batch_completed(1, downloaded_size);
+                            }
                         }
                     }
                 } catch (const DownloadFailure &exc) {
@@ -1056,7 +1058,7 @@ std::vector<DownloadTarget> DownloadClient::collect_targets(const ClosedDateRang
     return targets;
 }
 
-void DownloadClient::download_range(const ClosedDateRange &range, int limit_override) const {
+void DownloadClient::download_range(const ClosedDateRange &range, int limit_override, bool show_progress) const {
     std::vector<Resource> resources = limited_resources(range, config_, resolve_limit(limit_override));
     if (resources.empty()) {
         return;
@@ -1091,16 +1093,20 @@ void DownloadClient::download_range(const ClosedDateRange &range, int limit_over
         return;
     }
 
-    FileProgressDisplay progress(resources.size(), all_sizes_known ? known_total_bytes : 0, "download");
-    if (completed_count > 0) {
-        progress.mark_batch_completed(completed_count, completed_bytes);
+    std::unique_ptr<FileProgressDisplay> progress;
+    if (show_progress) {
+        progress = std::make_unique<FileProgressDisplay>(resources.size(),
+                                                         all_sizes_known ? known_total_bytes : 0, "download");
+    }
+    if (progress != nullptr && completed_count > 0) {
+        progress->mark_batch_completed(completed_count, completed_bytes);
     }
 
     std::vector<FailedDownload> failures;
     try {
         const std::size_t worker_count =
             std::min<std::size_t>(pending.size(), static_cast<std::size_t>(config_.download_workers));
-        failures = run_download_round(&resources, pending, config_.output_dir, worker_count, &progress,
+        failures = run_download_round(&resources, pending, config_.output_dir, worker_count, progress.get(),
                                       &completed_resources);
 
         for (int retry_round = 1; retry_round <= kDefaultRetries && !failures.empty(); ++retry_round) {
@@ -1112,12 +1118,16 @@ void DownloadClient::download_range(const ClosedDateRange &range, int limit_over
             }
             const std::size_t retry_workers =
                 std::min<std::size_t>(pending.size(), static_cast<std::size_t>(config_.download_workers));
-            failures = run_download_round(&resources, pending, config_.output_dir, retry_workers, &progress,
+            failures = run_download_round(&resources, pending, config_.output_dir, retry_workers, progress.get(),
                                           &completed_resources);
         }
-        progress.finish();
+        if (progress != nullptr) {
+            progress->finish();
+        }
     } catch (...) {
-        progress.close();
+        if (progress != nullptr) {
+            progress->close();
+        }
         throw;
     }
 
