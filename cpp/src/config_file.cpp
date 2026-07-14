@@ -389,6 +389,10 @@ class JsonConfigParser {
             config_->cache.output_dir = require_string(key, value);
         } else if (key == "download_workers") {
             config_->cache.download_workers = require_int(key, value);
+        } else if (key == "parser_workers") {
+            config_->cache.parser_workers = require_int(key, value);
+        } else if (key == "message_batch_size") {
+            config_->cache.message_batch_size = require_int(key, value);
         } else if (key == "limit") {
             if (value.kind == JsonScalarKind::Null) {
                 config_->cache.limit = -1;

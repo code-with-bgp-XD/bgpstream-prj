@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.16)
 
 project(bgpstream_runner LANGUAGES CXX)
 
+include(CTest)
+
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR)
   message(FATAL_ERROR "In-source builds are disabled. Use: cmake -S . -B build")
 endif()
@@ -33,6 +35,8 @@ add_library(
   cpp/src/common.cpp
   cpp/src/config_file.cpp
   cpp/src/download_client.cpp
+  cpp/src/mrt_parser.cpp
+  cpp/src/parsed_cache.cpp
   cpp/src/chunk_engine.cpp
 )
 
@@ -67,6 +71,7 @@ target_link_libraries(
     CURL::libcurl
     ${CURSES_LIBRARIES}
     Threads::Threads
+    ${CMAKE_DL_LIBS}
 )
 
 function(bgpstream_add_processor_plugin target_name)
@@ -94,6 +99,12 @@ target_link_libraries(
     bgpstream_runner_core
     ${CMAKE_DL_LIBS}
 )
+
+if(BUILD_TESTING)
+  add_executable(parsed_cache_test tests/parsed_cache_test.cpp)
+  target_link_libraries(parsed_cache_test PRIVATE bgpstream_runner_core)
+  add_test(NAME parsed_cache_round_trip COMMAND parsed_cache_test)
+endif()
 
 add_subdirectory(examples)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/plugins/CMakeLists.txt")

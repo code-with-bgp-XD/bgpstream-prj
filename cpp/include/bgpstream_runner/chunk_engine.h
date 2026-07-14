@@ -12,6 +12,7 @@
 
 #include "bgpstream_runner/download_client.h"
 #include "bgpstream_runner/message_processor.h"
+#include "bgpstream_runner/mrt_parser.h"
 #include "bgpstream_runner/types.h"
 
 namespace bgpstream_runner {
@@ -29,35 +30,16 @@ class ChunkEngine {
                                             std::string_view run_status, std::string_view error_message = {}) const;
 
    private:
-    struct FileTraversalStats {
-        std::uint64_t visited_messages = 0;
-        std::uint64_t rib_messages = 0;
-        std::uint64_t announcement_messages = 0;
-        std::uint64_t withdrawal_messages = 0;
-        std::uint64_t peer_state_messages = 0;
-        std::uint64_t end_of_rib_messages = 0;
-    };
-
-    struct PlannedDownloadEstimate {
-        std::uint64_t additional_bytes = 0;
-        bool all_sizes_known = true;
-    };
-
     using MessageTimestamp = std::pair<std::time_t, std::uint32_t>;
 
     void process_files(const std::vector<std::filesystem::path> &files, const ClosedDateRange &chunk,
                        FileProgressDisplay &progress);
-    FileTraversalStats traverse_single_file(const std::filesystem::path &file_path, const ClosedDateRange &chunk,
-                                            std::mutex *processor_mutex);
+    MessageTraversalStats traverse_single_file(const std::filesystem::path &file_path,
+                                               const ClosedDateRange &chunk, std::mutex *processor_mutex);
     void dispatch_message_batch(std::vector<BGPMessage> &messages, std::mutex *processor_mutex);
     void reset_stats();
     void increment_chunk_count();
-    void record_processed_file(const FileTraversalStats &file_stats);
-    void record_skipped_parse_file();
-    std::vector<std::filesystem::path> existing_target_files(const std::vector<DownloadTarget> &targets) const;
-    std::uint64_t cache_size_bytes() const;
-    PlannedDownloadEstimate planned_download_bytes(const std::vector<DownloadTarget> &targets) const;
-    void evict_cache_if_needed(const std::vector<DownloadTarget> &targets) const;
+    void record_processed_file(const MessageTraversalStats &file_stats);
 
     Config config_;
     DownloadClient download_client_;

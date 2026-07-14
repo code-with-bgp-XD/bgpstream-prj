@@ -34,6 +34,8 @@ struct CacheConfig {
     std::string collector = kDefaultCollector;
     std::filesystem::path output_dir = kDefaultDataRoot;
     int download_workers = kDefaultDownloadWorkers;
+    int parser_workers = kDefaultParserWorkers;
+    int message_batch_size = kDefaultMessageBatchSize;
     int limit = -1;
 };
 
@@ -49,7 +51,7 @@ struct Config {
     int message_batch_size = kDefaultMessageBatchSize;
     int chunk_size = kDefaultChunkSize;
     ChunkUnit chunk_unit = ChunkUnit::Month;
-    double max_cache_size_gb = kDefaultMaxCacheSizeGiB;
+    double max_cache_size_gb = kDefaultMaxCacheSizeGiB;  // Legacy compatibility; no eviction is performed.
     int limit = -1;
     bool log_phase_transitions = true;
     bool log_chunk_summary = true;
@@ -122,6 +124,9 @@ enum class BGPMessageFields : std::uint64_t {
     PeerStates = std::uint64_t{1} << 30,
     Annotations = std::uint64_t{1} << 31,
 };
+
+inline constexpr BGPMessageFields kAllBGPMessageFields =
+    static_cast<BGPMessageFields>((static_cast<std::uint64_t>(BGPMessageFields::Annotations) << 1) - 1);
 
 constexpr BGPMessageFields operator|(BGPMessageFields left, BGPMessageFields right) noexcept {
     return static_cast<BGPMessageFields>(static_cast<std::uint64_t>(left) |

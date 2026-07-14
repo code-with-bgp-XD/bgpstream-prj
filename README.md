@@ -1,14 +1,17 @@
 # BGPStream Chunk Runner
 
-这个项目基于 CAIDA `libBGPStream`，使用 Linux C++17 对较长时间范围内的 BGP update 数据做“分段下载、分段处理、缓存复用”，从而避免一次性下载整段历史数据导致磁盘占用过大，并减少重复实验时的重复下载成本。下载和处理均在同一个 C++ 进程内完成，运行时不依赖 Python。
+这个项目基于 CAIDA `libBGPStream`，使用 Linux C++17 下载 BGP update MRT 文件，将其一次性预解析成版本化二进制缓存，并让后续分析直接读取解析缓存。下载、预解析和分析均由 C++ 完成，运行时不依赖 Python。
 
-当前架构分成两层：
+当前架构分成三层：
 
 1. C++ 下载层
    使用 `libcurl` 负责远端资源发现、HTTPS 下载、断点续传、并发、重试和文件落盘。Route Views collector 直接使用官方归档地址，其他 collector 通过 CAIDA Broker API 发现资源。
 
-2. C++ 处理中层 + 处理器插件
-   C++ 中层负责按配置切片、调用原生下载层、遍历 MRT 文件里的 BGP 报文、把报文批量传给上层处理器。
+2. C++ MRT 预解析与二进制缓存层
+   下载模式使用 `libBGPStream` 将每个原始 MRT 文件完整解析一次，写入带 schema 版本、源文件指纹、分块校验和的 `.bgpcache` 文件。系统存在 `libzstd.so.1` 时自动使用 Zstd 压缩，否则写入未压缩分块。
+
+3. C++ 分析中层 + 处理器插件
+   分析中层按配置切片，只读取已经生成的 `.bgpcache`，按插件声明的字段投影为 `BGPMessage` 批次并交给上层处理器。分析模式不会下载文件，也不会现场解析 MRT。
    具体“怎么处理一批报文”由 `MessageProcessor` 插件决定，主程序在运行时动态加载处理器库。
 
 ---
@@ -17,19 +20,27 @@
 
 整体流程如下：
 
-1. 程序启动时会强制读取仓库根目录的 `config.json`；如果文件不存在，会直接报错退出。配置分为 `analysis`（数据分析）和 `cache`（数据预下载）两个顶层区块。仓库里提交的是 `config.example.json` 模板。读取完配置后，再用命令行参数覆盖当前运行模式的同名字段，最终构造 `Config`。
-2. 按 `chunk_size + chunk_unit` 把 `start_date ~ end_date` 切成多个 `ClosedDateRange`。
-3. 对每个分片：
-   - 在 C++ 内发现该分片需要的 update 文件：`route-views*` collector 直接生成 Route Views 归档 URL，其他 collector 查询 CAIDA Broker API。
-   - 先检查这些文件是否已经缓存到本地；如果都在，就直接跳过远端下载。
-   - 如果有缺失文件，会先基于资源发现阶段已知的大小信息做缓存预算；当能估算出“当前缓存大小 + 本次预计新增下载字节”超出 `max_cache_size_gb` 时，会按“最旧文件优先”删除旧缓存。如果即使删掉可淘汰文件也放不下当前分片，会直接报错退出。资源发现阶段默认不额外发送 HEAD 请求，因此大小未知时会只依据当前缓存量决策。
-   - 用 `libcurl` 并发下载当前缺失的文件；数据先写入 `.part`，服务器支持 Range 时会从已有分片继续，成功校验大小后再原子改名为最终文件。单轮失败会进行 3 轮指数退避重试。
-   - 使用 `bgpstream` 的 `singlefile` 接口遍历该分片所有文件中的可用 BGP 元素。
-   - 中层把报文组装成 `std::vector<BGPMessage>` 批量交给处理器。
-   - 输出一次当前累计统计。
-   - 保留已经下载的文件，作为后续实验的本地缓存。
-4. 所有分片完成后，输出最终累计统计。
-5. 每次程序启动只会生成一个 `log/rcd-*` 日志文件。每个分片处理结束后、正常结束时、异常退出时，都会把当前累计统计追加到同一个文件里。
+1. 程序启动时强制读取仓库根目录的 `config.json`。配置分为 `analysis` 和 `cache` 两个顶层区块。
+2. `./manage.sh download` 使用 `cache` 区块：
+   - 发现所需 update 资源；
+   - 只下载缺失的原始 MRT，完整原始文件永不由自动缓存淘汰逻辑删除；
+   - 检查每个 MRT 对应的解析缓存；缓存缺失、结构损坏、schema 过期或源文件指纹变化时重新生成；
+   - 预解析先写入 `.part`，完整结束后原子发布为 `.bgpcache`。
+3. `./manage.sh run` 使用 `analysis` 区块：
+   - 按 `chunk_size + chunk_unit` 切分日期范围；
+   - 在处理第一条消息前检查整个计划中的原始 MRT 和解析缓存；
+   - 任一文件缺失或缓存失效时立即报错，绝不自动下载或现场补解析；
+   - 从解析缓存读取消息，按 `required_message_fields()` 只物化插件需要的字段，再批量交给处理器。
+4. 所有分片完成后输出最终累计统计。每次分析运行使用一个 `log/rcd-*` 文件记录分片、成功或异常结果。
+
+缓存目录示例：
+
+```text
+bgpdata/routeviews/route-views.sg/updates/
+├── updates.20250101.0000.bz2
+└── parsed-cache/
+    └── updates.20250101.0000.bz2.bgpcache
+```
 
 ---
 
@@ -49,6 +60,8 @@
     │   ├── common.h
     │   ├── config_file.h
     │   ├── download_client.h
+    │   ├── mrt_parser.h
+    │   ├── parsed_cache.h
     │   ├── message_processor.h
     │   ├── plugin_loader.h
     │   ├── processor_plugin_api.h
@@ -58,6 +71,8 @@
         ├── common.cpp
         ├── config_file.cpp
         ├── download_client.cpp
+        ├── mrt_parser.cpp
+        ├── parsed_cache.cpp
         ├── chunk_engine.cpp
         └── plugin_loader.cpp
 ```
@@ -86,7 +101,7 @@
   - 批量处理大小
   - 日志开关
   - 下载条目限制
-  - 固定缓存目录和独立预下载范围
+  - 固定缓存目录和独立的下载/预解析范围
 
 ### C++ 公共类型与工具
 
@@ -112,8 +127,8 @@
 
 ### BGPMessage 数据模型
 
-`BGPMessage` 可以承载 libBGPStream 公开 record/elem API 能提供的完整信息。实际运行时，插件通过
-`required_message_fields()` 声明自己会读取的字段，中层只把这些字段物化到每条 message 中。字段按来源分为：
+`BGPMessage` 可以承载 libBGPStream 公开 record/elem API 能提供的完整信息。预解析阶段保存完整字段集合；分析时插件通过
+`required_message_fields()` 声明自己会读取的字段，缓存读取器只把这些字段物化到每条 message 中。字段按来源分为：
 
 - record 级信息：`record_type`、`record_status`、`timestamp`、`timestamp_microseconds`、`project_name`、`collector_name`、`router_name`、`router_ip`、`dump_position`、`dump_timestamp`、`source_file`、`record_index`、`element_index`。
 - elem 级来源信息：`type`、`originated_timestamp`、`originated_timestamp_microseconds`、`peer_ip`、`peer_asn`、`prefix`、`next_hop`。
@@ -135,11 +150,11 @@
 - `HasASPath` 和 `HasCommunities` 分别只物化 `has_as_path` 和 `has_communities`；检查属性是否存在不会触发
   path 字符串转换或 community 容器填充。
 - `origin`、`med`、`local_pref`、`aggregator`、peer-state 字段使用 `std::optional` 表示 libBGPStream 是否提供了该值。
-- singlefile 接口把 project/collector 标成 `singlefile`；中层会用下载时的 `Config.project` 和 `Config.collector` 替换该占位值，同时用 `source_file` 保留实际本地文件来源。
+- singlefile 接口把 project/collector 标成 `singlefile`；预解析器会用下载配置中的 project/collector 替换该占位值。读取缓存时，`source_file` 使用当前原始 MRT 的绝对路径恢复，因此仓库移动后不会保留旧路径。
 - `record_index` 是 record 在 `source_file` 中的零基序号，`element_index` 是 elem 在该 record 中的零基序号；插件可用三者可靠地重新归组同一底层 BGP record 拆出的元素。
 
-这里的“完整”以 libBGPStream 公开的元素模型为边界。libBGPStream 仍会把原始 MRT/BGP 报文解析成
-`bgpstream_elem_t`；字段声明优化的是从 elem 到 `BGPMessage` 的转换和数据构造。未通过公开 elem 字段暴露的
+这里的“完整”以 libBGPStream 公开的元素模型为边界。预解析阶段仍会把原始 MRT/BGP 报文解析成
+`bgpstream_elem_t`；字段声明优化的是从解析缓存到分析期 `BGPMessage` 的数据构造。未通过公开 elem 字段暴露的
 原始字节、未知 path attribute、large/extended community 等无法从这一层恢复。`annotations.cfg` 是带有
 借用生命周期的不透明配置指针，因此不会传给插件；`has_rpki_config` 只安全地记录它是否存在。
 
@@ -154,14 +169,33 @@
   - 用 `.part` 文件处理断点续传、远端大小校验和最终原子改名
   - 对失败文件执行指数退避重试，并输出可操作的错误提示
 
+下载层只会处理缺失文件和下载产生的 `.part`；不会删除已经完整落盘的原始 MRT。
+
+### MRT 预解析与解析缓存层
+
+- `cpp/include/bgpstream_runner/mrt_parser.h`
+  `cpp/src/mrt_parser.cpp`
+  使用 libBGPStream 完整遍历单个 MRT，把 record/elem 转换为完整的 `BGPMessage` 批次。
+
+- `cpp/include/bgpstream_runner/parsed_cache.h`
+  `cpp/src/parsed_cache.cpp`
+  负责：
+  - 为每个原始 MRT 生成独立 `.bgpcache`；
+  - 记录 schema 版本、原文件大小和修改时间；
+  - 分块写入、校验和验证以及可选 Zstd 压缩；
+  - 使用 `.part` + 原子改名避免把中断文件当成有效缓存；
+  - 分析期执行字段投影和时间范围过滤；
+  - 并行生成不同 MRT 的解析缓存。
+
 ### C++ 中层引擎
 
 - `cpp/include/bgpstream_runner/chunk_engine.h`
   `cpp/src/chunk_engine.cpp`
   这是当前系统的核心中层。职责包括：
   - 按配置的分片大小和单位切片运行
-  - 管理每个分片的下载、处理、清理生命周期
-  - 使用 `bgpstream` 逐文件遍历 RIB / announcement / withdrawal / peer-state / End-of-RIB 元素
+  - 在分析开始前验证所有原始文件和解析缓存
+  - 只读取解析缓存，不调用下载器下载文件，也不解析原始 MRT
+  - 逐文件恢复 RIB / announcement / withdrawal / peer-state / End-of-RIB 元素
   - 把报文打包成批次后交给处理器
   - 输出分片级和全局累计统计
 
@@ -245,8 +279,8 @@
 - 批量处理减少虚函数开销
   中层不是“每条报文调用一次虚函数”，而是“积累一批 `BGPMessage` 后再调用一次处理器”，更适合大规模数据遍历。
 
-- 缓存上限控制磁盘占用
-  已下载文件会保留复用；如果缓存超过配置的上限，程序会在下载前按“最旧文件优先”粗略淘汰旧文件。
+- 原始数据与派生缓存分离
+  原始 MRT 是不可替代的数据源，自动流程不会淘汰它；解析缓存是可验证、可重新生成的派生文件。
 
 ---
 
@@ -269,6 +303,7 @@
 - `libcurl` 开发头文件和库：原生 HTTP/HTTPS 下载
 - `ncurses` 开发头文件和库：终端进度显示
 - CAIDA `libBGPStream` 开发头文件和库：MRT/BGP 解析
+- `libzstd.so.1`：可选运行时依赖；存在时压缩解析缓存，不需要 Zstd 开发头文件
 - POSIX Threads 和 `dl`：由常见 Linux C/C++ 工具链提供
 
 Ubuntu / Debian 推荐按以下步骤安装。先安装本项目自身和添加软件源所需的系统包：
@@ -310,7 +345,7 @@ sudo dnf install -y \
 
 ```bash
 test -r /usr/include/bgpstream.h
-ldconfig -p | grep -E 'libbgpstream|libcurl|libncurses'
+ldconfig -p | grep -E 'libbgpstream|libcurl|libncurses|libzstd'
 ```
 
 如果 `libBGPStream` 安装在非标准目录，可以在配置时显式指定：
@@ -384,7 +419,7 @@ cp config.example.json config.json
 - 当前处理器的业务统计结果
   具体字段取决于你当前加载的本地插件实现。
 
-缓存目录固定为 `cache.output_dir`，预下载和分析共用。程序不会在每个分片结束后删除缓存文件；如果分析阶段发现当前分片仍需下载新文件，会在下载前尽量评估“当前缓存 + 本次预计新增下载字节”是否超过 `analysis.max_cache_size_gb`。超限时会按“最旧文件优先”淘汰旧缓存；如果当前分片本身就无法放进缓存上限，也会直接报错。资源发现阶段不会为了缓存预算逐文件探测远端大小，所以在大小未知时，清理判断会退化成只基于当前缓存大小。
+缓存目录固定为 `cache.output_dir`。分析阶段对该目录完全只读：缺少原始 MRT 或 `.bgpcache` 时直接失败，不会下载、预解析或淘汰其他文件。下载阶段只补齐缺失的原始文件并生成/更新派生解析缓存。
 
 根目录下的 `manage.sh` 可以统一执行构建和缓存管理：
 
@@ -410,21 +445,21 @@ cp config.example.json config.json
 - `run-release`
   先执行一次 Release 构建，再启动 `build-release/bgpstream_analyzer`。
 - `download`
-  先执行一次 Debug 构建，再按 `config.json` 的 `cache` 区块下载数据。
+  先执行一次 Debug 构建，再按 `config.json` 的 `cache` 区块下载缺失 MRT 并生成解析缓存。
 - `download-release`
   与 `download` 行为相同，但使用 `build-release/` 中的 Release 可执行文件。
 - `cache-size`
   读取根目录 `config.json` 里的 `cache.output_dir`，统计当前缓存文件数量和总大小。
 - `cache-clear`
-  读取根目录 `config.json` 里的 `cache.output_dir`，删除全部缓存文件。
+  只删除 `parsed-cache/` 下由程序生成的 `.bgpcache`/`.part`，保留所有原始 MRT。
 
-`download` 和 `download-release` 都只下载数据，不加载处理器插件，也不执行数据分析。已经完整缓存的文件会直接
-复用。网络中断或进程停止后会保留 `.part`，再次运行时使用 HTTP Range 从已有字节继续；只有确认分片损坏、
-无法续传时才删除重下。结束日期为包含式。
+`download` 和 `download-release` 不加载处理器插件，也不执行业务分析。它们先复用或下载原始 MRT，再并行生成解析缓存。网络中断或进程停止后会保留下载 `.part`；预解析中断也只留下 `.bgpcache.part`。完整原始 MRT 不会被删除。结束日期为包含式。
+
+分析读取每个分块时还会验证解压结果和校验和。如果出现罕见的缓存内容损坏，可执行 `cache-clear` 后重新运行 `download`；该操作只重建派生缓存，不会删除原始 MRT。
 
 `cache.output_dir` 是下载和分析共用的唯一缓存根目录：相对路径固定以仓库根目录为基准，两个 download 命令
 都不能临时覆盖该目录，分析程序也始终从这里查找数据。这样只要 `analysis.project + analysis.collector` 与已下载
-数据一致、分析日期位于已下载范围内，后续分析就会直接命中缓存。
+数据一致、分析日期位于已下载且已预解析的范围内，后续分析就会直接命中缓存。
 
 所有 build、run 和 download 命令都支持 `--build-dir PATH` 指定构建目录。`download` 和
 `download-release` 还支持用命令行临时覆盖 `cache` 区块的数据源、日期、并发数和文件数限制，例如：
@@ -435,10 +470,12 @@ cp config.example.json config.json
   --collector rrc00 \
   --start-date 2025-11-01 \
   --end-date 2025-11-07 \
-  --download-workers 8
+  --download-workers 8 \
+  --parser-workers 4 \
+  --message-batch-size 8192
 ```
 
-`cache-size` 和 `cache-clear` 仍可使用 `--output-dir PATH` 检查或清理其他目录。预下载不会按 `analysis.max_cache_size_gb` 淘汰文件，因此应在下载前确认固定缓存目录有足够磁盘空间。
+`cache-size` 和 `cache-clear` 仍可使用 `--output-dir PATH` 检查其他目录或只清理其中的派生解析缓存。程序不再按容量上限自动淘汰任何文件，因此批量预解析前应确认磁盘有足够空间。
 
 如果需要给主程序透传参数，可以使用 `--`，例如：
 
@@ -485,6 +522,8 @@ cp config.example.json config.json
     "collector": "route-views.sg",
     "output_dir": "bgpdata",
     "download_workers": 32,
+    "parser_workers": 8,
+    "message_batch_size": 8192,
     "limit": -1
   }
 }
@@ -527,7 +566,7 @@ cp config.example.json config.json
 - `log_chunk_summary`
 - `analysis.log_final_summary`
 
-`cache` 区块保存独立的数据预下载配置：
+`cache` 区块保存独立的下载与预解析配置：
 
 - `start_date`
 - `end_date`
@@ -535,6 +574,8 @@ cp config.example.json config.json
 - `collector`
 - `output_dir`
 - `download_workers`
+- `parser_workers`
+- `message_batch_size`
 - `limit`
 
 各字段含义：
@@ -563,8 +604,14 @@ cp config.example.json config.json
 - `cache.download_workers`
   下载阶段的并发线程数。值越大，单分片下载速度通常越快，但也会增加网络和上游服务压力。
 
+- `cache.parser_workers`
+  预解析阶段同时处理的原始 MRT 文件数。每个线程使用独立 libBGPStream 实例，并写入独立缓存文件。
+
+- `cache.message_batch_size`
+  单个解析缓存压缩块最多包含的消息数。较大值通常提高压缩率，但会增加预解析和读取时的峰值内存。
+
 - `analysis.parser_workers`
-  C++ 中层遍历本地 MRT 文件时的并发线程数。通常对应“同时解析多少个文件”。当插件的 `supports_concurrent_message_handling()` 返回 `true` 时，这些线程也可以同时进入同一个插件实例的 `handle_messages()`；否则框架仍会把插件调用串行化。当 `requires_strict_chronological_order()` 返回 `true` 时，为保证全局时序，框架会忽略这里更大的并发值并只使用一个解析线程。注意，增加这个线程数会显著增加内存占用，请不要设置为太大的值。
+  C++ 中层同时读取的解析缓存文件数。当插件的 `supports_concurrent_message_handling()` 返回 `true` 时，这些线程也可以同时进入同一个插件实例的 `handle_messages()`；否则框架仍会把插件调用串行化。当 `requires_strict_chronological_order()` 返回 `true` 时，为保证全局时序，框架会忽略这里更大的并发值并只使用一个读取线程。增加这个线程数也会增加内存占用。
 
 - `analysis.message_batch_size`
   中层交给处理器的单批报文数量。中层会先把报文聚成一个 `std::vector<BGPMessage>`，再调用一次处理器的 `handle_messages()`。
@@ -580,13 +627,13 @@ cp config.example.json config.json
   - `chunk_size = 7`, `chunk_unit = "day"` 表示按 7 天处理
 
 - `analysis.max_cache_size_gb`
-  本地缓存目录的大致上限，单位是 `GiB`，支持小数，例如 `1.5`。当当前分片需要下载新文件，而且缓存总量已经明显超过这个值时，程序会在下载前按“最旧文件优先”粗略删除一批旧缓存。
+  为兼容已有 `config.json` 暂时保留，但当前版本忽略该值。程序不会基于容量自动删除原始 MRT 或解析缓存。
 
 - `analysis.limit` / `cache.limit`
-  文件数量限制。`analysis.limit` 限制一次分析最多处理的匹配文件数，`cache.limit` 限制一次预下载最多下载的匹配文件数。`-1` 表示不限制，正整数通常用于测试。
+  文件数量限制。`analysis.limit` 限制一次分析最多处理的匹配文件数，`cache.limit` 限制一次下载与预解析最多处理的匹配文件数。`-1` 表示不限制，正整数通常用于测试。
 
 - `analysis.log_phase_transitions`
-  是否输出 `plan phase`、`download phase`、`process phase`、`cache eviction` 这类阶段切换日志。
+  是否输出 `plan phase`、`process parsed-cache phase` 等阶段切换日志。
 
 - `analysis.log_chunk_summary`
   是否在每个分片处理完成后输出一次当前累计统计。

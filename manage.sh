@@ -16,6 +16,8 @@ download_collector=""
 download_start_date=""
 download_end_date=""
 download_workers=""
+download_parser_workers=""
+download_message_batch_size=""
 download_limit=""
 download_option_used=false
 
@@ -28,10 +30,10 @@ Commands:
   build-release              Configure and build Release into build-release/
   run                        Configure, build, and run the Debug executable
   run-release                Configure, build, and run the Release executable
-  download                   Build Debug and download one source/date range
-  download-release           Build Release and download one source/date range
+  download                   Build Debug, download MRT files, and generate parsed caches
+  download-release           Same as download, using the Release executable
   cache-size                 Show cached file count and total size
-  cache-clear                Delete all cached files under output_dir
+  cache-clear                Delete generated parsed caches only; preserve source MRT files
 
 Options:
   --build-dir PATH           Override the directory used by build/run/download commands
@@ -41,6 +43,8 @@ Options:
   --start-date YYYY-MM-DD    Temporarily override cache.start_date for download commands
   --end-date YYYY-MM-DD      Temporarily override cache.end_date for download commands
   --download-workers N       Override concurrency for download commands
+  --parser-workers N         Override preparse concurrency for download commands
+  --message-batch-size N     Override preparse batch size for download commands
   --limit N                  Limit matched files for download commands (for testing)
   --help, -h                 Show this help text
 EOF
@@ -186,6 +190,12 @@ run_download() {
   if [ -n "$download_workers" ]; then
     download_args+=(--download-workers "$download_workers")
   fi
+  if [ -n "$download_parser_workers" ]; then
+    download_args+=(--parser-workers "$download_parser_workers")
+  fi
+  if [ -n "$download_message_batch_size" ]; then
+    download_args+=(--message-batch-size "$download_message_batch_size")
+  fi
   if [ -n "$download_limit" ]; then
     download_args+=(--limit "$download_limit")
   fi
@@ -207,18 +217,24 @@ run_cache_size() {
 
 run_cache_clear() {
   local cache_root="$1"
-  mapfile -t cache_summary < <(summarize_cache "$cache_root")
-  local file_count="${cache_summary[0]}"
-  local total_bytes="${cache_summary[1]}"
-
   if [ ! -d "$cache_root" ]; then
     echo "cache_root: $cache_root"
     echo "cache is already empty"
     return 0
   fi
 
-  rm -rf "$cache_root"
+  local file_count
+  local total_bytes
+  file_count="$(find "$cache_root" -type f -path '*/parsed-cache/*' \
+    \( -name '*.bgpcache' -o -name '*.bgpcache.part' \) | wc -l | tr -d ' ')"
+  total_bytes="$(find "$cache_root" -type f -path '*/parsed-cache/*' \
+    \( -name '*.bgpcache' -o -name '*.bgpcache.part' \) -printf '%s\n' |
+    awk 'BEGIN { sum = 0 } { sum += $1 } END { printf "%.0f\n", sum }')"
+  find "$cache_root" -type f -path '*/parsed-cache/*' \
+    \( -name '*.bgpcache' -o -name '*.bgpcache.part' \) -delete
+  find "$cache_root" -type d -name parsed-cache -empty -delete
   echo "cache_root: $cache_root"
+  echo "source_mrt_files_preserved: true"
   echo "removed_files: $file_count"
   echo "removed_bytes: $total_bytes"
   echo "removed_human_size: $(format_bytes "$total_bytes")"
@@ -298,6 +314,24 @@ while [ "$#" -gt 0 ]; do
         exit 1
       fi
       download_workers="$2"
+      download_option_used=true
+      shift 2
+      ;;
+    --parser-workers)
+      if [ "$#" -lt 2 ]; then
+        echo "Missing value for --parser-workers" >&2
+        exit 1
+      fi
+      download_parser_workers="$2"
+      download_option_used=true
+      shift 2
+      ;;
+    --message-batch-size)
+      if [ "$#" -lt 2 ]; then
+        echo "Missing value for --message-batch-size" >&2
+        exit 1
+      fi
+      download_message_batch_size="$2"
       download_option_used=true
       shift 2
       ;;

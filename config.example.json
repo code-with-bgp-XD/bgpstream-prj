@@ -22,6 +22,8 @@
     "collector": "route-views.sg",
     "output_dir": "bgpdata",
     "download_workers": 32,
+    "parser_workers": 8,
+    "message_batch_size": 8192,
     "limit": -1
   }
 }

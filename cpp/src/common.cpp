@@ -411,12 +411,12 @@ void FileProgressDisplay::close_locked() {
            << "  --message-batch-size N\n"
            << "  --chunk-size N\n"
            << "  --chunk-unit day|month\n"
-           << "  --max-cache-size-gb NUMBER\n"
+           << "  --max-cache-size-gb NUMBER  Legacy compatibility option; ignored\n"
            << "  --log-phase-transitions true|false\n"
            << "  --log-chunk-summary true|false\n"
            << "  --log-final-summary true|false\n"
            << "  --limit N\n"
-           << "  --download-only\n"
+           << "  --download-only  Download missing MRT files and generate parsed caches\n"
            << "  --help\n";
     std::exit(exit_code);
 }
@@ -436,13 +436,19 @@ Config parse_args(int argc, char **argv) {
         throw std::runtime_error("Required config file does not exist: " + config_file.string());
     }
     apply_json_config_file(config_file, &config);
+    // Raw MRT files and their derived parsed caches share the cache root in
+    // both modes. `analysis` intentionally has no separate output_dir key.
+    config.output_dir = config.cache.output_dir;
 
     if (download_only_requested) {
         config.start_date = config.cache.start_date;
         config.end_date = config.cache.end_date;
         config.project = config.cache.project;
         config.collector = config.cache.collector;
+        config.download_workers = config.cache.download_workers;
         config.limit = config.cache.limit;
+        config.parser_workers = config.cache.parser_workers;
+        config.message_batch_size = config.cache.message_batch_size;
         config.download_only = true;
     }
 
@@ -533,9 +539,6 @@ Config parse_args(int argc, char **argv) {
     }
     if (config.chunk_size < 1) {
         throw std::runtime_error("--chunk-size must be at least 1");
-    }
-    if (config.max_cache_size_gb <= 0) {
-        throw std::runtime_error("--max-cache-size-gb must be greater than 0");
     }
     if (config.limit == 0 || config.limit < -1) {
         throw std::runtime_error("--limit must be positive, or omitted");
