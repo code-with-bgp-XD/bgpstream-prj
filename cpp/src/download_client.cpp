@@ -584,7 +584,8 @@ std::string url_encode(std::string_view value) {
     return result;
 }
 
-std::vector<Resource> fetch_resources_via_broker(const ClosedDateRange &range, const Config &config) {
+std::vector<Resource> fetch_resources_via_broker(const ClosedDateRange &range, const Config &config,
+                                                 FileProgressDisplay *progress) {
     std::ostringstream url;
     url << kBrokerUrl << "?collectors%5B%5D=" << url_encode(config.collector) << "&types%5B%5D="
         << url_encode(kRecordType) << "&intervals%5B%5D="
@@ -621,6 +622,9 @@ std::vector<Resource> fetch_resources_via_broker(const ClosedDateRange &range, c
         }
         return lhs.url < rhs.url;
     });
+    if (progress != nullptr) {
+        progress->mark_batch_completed(1, 0);
+    }
     return resources;
 }
 
@@ -648,7 +652,8 @@ std::vector<routeviews_archive::UpdateEntry> fetch_routeviews_month_index(const 
     return entries;
 }
 
-std::vector<Resource> fetch_resources_via_routeviews_direct(const ClosedDateRange &range, const Config &config) {
+std::vector<Resource> fetch_resources_via_routeviews_direct(const ClosedDateRange &range, const Config &config,
+                                                            FileProgressDisplay *progress) {
     std::vector<routeviews_archive::UpdateEntry> entries;
     std::map<std::string, std::string> entry_urls;
     for (const std::string &month : routeviews_archive::months_for_range(range)) {
@@ -659,6 +664,9 @@ std::vector<Resource> fetch_resources_via_routeviews_direct(const ClosedDateRang
         entries.insert(entries.end(), month_entries.begin(), month_entries.end());
         for (const routeviews_archive::UpdateEntry &entry : month_entries) {
             entry_urls.try_emplace(entry.filename, index_url + entry.filename);
+        }
+        if (progress != nullptr) {
+            progress->mark_batch_completed(1, 0);
         }
     }
 
@@ -680,11 +688,12 @@ std::vector<Resource> fetch_resources_via_routeviews_direct(const ClosedDateRang
     return resources;
 }
 
-std::vector<Resource> resolve_resources(const ClosedDateRange &range, const Config &config) {
+std::vector<Resource> resolve_resources(const ClosedDateRange &range, const Config &config,
+                                        FileProgressDisplay *progress) {
     if (config.collector.rfind("route-views", 0) == 0) {
-        return fetch_resources_via_routeviews_direct(range, config);
+        return fetch_resources_via_routeviews_direct(range, config, progress);
     }
-    return fetch_resources_via_broker(range, config);
+    return fetch_resources_via_broker(range, config, progress);
 }
 
 std::string filename_from_url(const std::string &url) {
@@ -737,8 +746,9 @@ std::optional<std::filesystem::path> available_local_path(const std::filesystem:
     return std::nullopt;
 }
 
-std::vector<Resource> limited_resources(const ClosedDateRange &range, const Config &config, int limit) {
-    std::vector<Resource> resources = resolve_resources(range, config);
+std::vector<Resource> limited_resources(const ClosedDateRange &range, const Config &config, int limit,
+                                        FileProgressDisplay *progress = nullptr) {
+    std::vector<Resource> resources = resolve_resources(range, config, progress);
     if (limit > 0 && resources.size() > static_cast<std::size_t>(limit)) {
         resources.resize(static_cast<std::size_t>(limit));
     }
@@ -1068,8 +1078,22 @@ std::string solution_hint(const FailedDownload &failure) {
 DownloadClient::DownloadClient(Config config) : config_(std::move(config)) { ensure_curl_initialized(); }
 
 std::vector<DownloadTarget> DownloadClient::collect_targets(const ClosedDateRange &range,
-                                                            int limit_override) const {
-    const std::vector<Resource> resources = limited_resources(range, config_, resolve_limit(limit_override));
+                                                            int limit_override,
+                                                            bool show_progress) const {
+    const bool uses_routeviews_direct = config_.collector.rfind("route-views", 0) == 0;
+    const std::size_t discovery_steps =
+        uses_routeviews_direct ? routeviews_archive::months_for_range(range).size() : 1;
+    std::unique_ptr<FileProgressDisplay> progress;
+    if (show_progress && discovery_steps > 0) {
+        progress = std::make_unique<FileProgressDisplay>(
+            discovery_steps, 0, "discover", uses_routeviews_direct ? "months" : "requests", false);
+    }
+
+    const std::vector<Resource> resources =
+        limited_resources(range, config_, resolve_limit(limit_override), progress.get());
+    if (progress != nullptr) {
+        progress->finish();
+    }
     std::vector<DownloadTarget> targets;
     targets.reserve(resources.size());
     for (const Resource &resource : resources) {

@@ -183,10 +183,13 @@ struct FileProgressDisplay::TerminalState {
     std::vector<SignalHandlerRegistration> signal_handlers;
 };
 
-FileProgressDisplay::FileProgressDisplay(std::size_t total_files, std::uint64_t total_bytes, std::string phase)
+FileProgressDisplay::FileProgressDisplay(std::size_t total_files, std::uint64_t total_bytes,
+                                         std::string phase, std::string item_label, bool show_bytes)
     : total_files_(total_files),
       total_bytes_(total_bytes),
       phase_(std::move(phase)),
+      item_label_(std::move(item_label)),
+      show_bytes_(show_bytes),
       started_at_(std::chrono::steady_clock::now()) {
     initialize_terminal_locked();
     render_locked();
@@ -215,6 +218,8 @@ std::string FileProgressDisplay::build_line_locked() const {
     static constexpr std::size_t kBarWidth = 36;
     const double fraction =
         total_files_ == 0 ? 1.0 : static_cast<double>(completed_files_) / static_cast<double>(total_files_);
+    const double displayed_percentage =
+        completed_files_ < total_files_ ? std::min(fraction * 100.0, 99.9) : 100.0;
     const std::size_t filled = static_cast<std::size_t>(fraction * static_cast<double>(kBarWidth));
     const auto elapsed =
         std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - started_at_);
@@ -230,10 +235,13 @@ std::string FileProgressDisplay::build_line_locked() const {
             output << ' ';
         }
     }
-    output << "] " << std::fixed << std::setprecision(1) << (fraction * 100.0) << "% " << completed_files_ << "/"
-           << total_files_ << " files " << format_bytes(completed_bytes_);
-    if (total_bytes_ > 0) {
-        output << "/" << format_bytes(total_bytes_);
+    output << "] " << std::fixed << std::setprecision(1) << displayed_percentage << "% "
+           << completed_files_ << "/" << total_files_ << " " << item_label_;
+    if (show_bytes_) {
+        output << " " << format_bytes(completed_bytes_);
+        if (total_bytes_ > 0) {
+            output << "/" << format_bytes(total_bytes_);
+        }
     }
     output << " elapsed=" << format_elapsed(elapsed);
     return output.str();

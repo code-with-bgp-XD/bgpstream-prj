@@ -1445,6 +1445,16 @@ ParsedCacheBuildSummary ensure_parsed_caches(const Config &config,
     std::vector<std::filesystem::path> pending;
     std::size_t reusable_count = 0;
     std::uint64_t reusable_source_bytes = 0;
+
+    std::unique_ptr<FileProgressDisplay> cache_check_progress;
+    if (show_progress && !unique_files.empty()) {
+        cache_check_progress =
+            std::make_unique<FileProgressDisplay>(unique_files.size(), 0, "cache-check");
+    }
+    const std::size_t cache_check_update_interval =
+        std::max<std::size_t>(unique_files.size() / 1000, 1);
+    std::size_t checked_batch_files = 0;
+    std::uint64_t checked_batch_bytes = 0;
     for (const std::filesystem::path &source_file : unique_files) {
         const std::uint64_t source_size = require_source_size(source_file);
         summary.source_bytes += source_size;
@@ -1456,6 +1466,21 @@ ParsedCacheBuildSummary ensure_parsed_caches(const Config &config,
         } else {
             pending.push_back(source_file);
         }
+
+        ++checked_batch_files;
+        checked_batch_bytes += source_size;
+        if (cache_check_progress != nullptr &&
+            checked_batch_files >= cache_check_update_interval) {
+            cache_check_progress->mark_batch_completed(checked_batch_files, checked_batch_bytes);
+            checked_batch_files = 0;
+            checked_batch_bytes = 0;
+        }
+    }
+    if (cache_check_progress != nullptr) {
+        if (checked_batch_files > 0) {
+            cache_check_progress->mark_batch_completed(checked_batch_files, checked_batch_bytes);
+        }
+        cache_check_progress->finish();
     }
     summary.reused_files = reusable_count;
 

@@ -16,7 +16,9 @@ namespace bgpstream_runner {
 
 class FileProgressDisplay {
    public:
-    FileProgressDisplay(std::size_t total_files, std::uint64_t total_bytes, std::string phase = "process");
+    FileProgressDisplay(std::size_t total_files, std::uint64_t total_bytes,
+                        std::string phase = "process", std::string item_label = "files",
+                        bool show_bytes = true);
     FileProgressDisplay(const FileProgressDisplay &) = delete;
     FileProgressDisplay &operator=(const FileProgressDisplay &) = delete;
     ~FileProgressDisplay();
@@ -39,6 +41,8 @@ class FileProgressDisplay {
     const std::size_t total_files_;
     const std::uint64_t total_bytes_;
     const std::string phase_;
+    const std::string item_label_;
+    const bool show_bytes_;
     const std::chrono::steady_clock::time_point started_at_;
     std::mutex mutex_;
     std::size_t completed_files_ = 0;

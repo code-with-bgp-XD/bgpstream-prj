@@ -17,7 +17,8 @@ class DownloadClient {
    public:
     explicit DownloadClient(Config config);
 
-    std::vector<DownloadTarget> collect_targets(const ClosedDateRange &range, int limit_override) const;
+    std::vector<DownloadTarget> collect_targets(const ClosedDateRange &range, int limit_override,
+                                                bool show_progress = false) const;
     void download_range(const ClosedDateRange &range, int limit_override, bool show_progress = true) const;
 
    private:

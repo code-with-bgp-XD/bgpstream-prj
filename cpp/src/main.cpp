@@ -19,7 +19,7 @@ void run_download_and_preparse(const bgpstream_runner::Config &config) {
     const bgpstream_runner::ClosedDateRange range = bgpstream_runner::parse_closed_date_range(config);
     const bgpstream_runner::DownloadClient download_client(config);
     const std::vector<bgpstream_runner::DownloadTarget> targets =
-        download_client.collect_targets(range, config.limit);
+        download_client.collect_targets(range, config.limit, true);
 
     if (targets.empty()) {
         throw std::runtime_error("No files matched the requested data source and date range.");
@@ -27,18 +27,38 @@ void run_download_and_preparse(const bgpstream_runner::Config &config) {
 
     std::size_t cached_before = 0;
     std::size_t parsed_before = 0;
+    auto inventory_progress =
+        std::make_unique<bgpstream_runner::FileProgressDisplay>(targets.size(), 0, "inventory");
+    const std::size_t inventory_update_interval =
+        std::max<std::size_t>(targets.size() / 1000, 1);
+    std::size_t inventoried_batch_files = 0;
+    std::uint64_t inventoried_batch_bytes = 0;
     for (const auto &target : targets) {
         const std::filesystem::path source_file = std::filesystem::exists(target.local_path)
                                                       ? target.local_path
                                                       : target.destination_path;
         if (std::filesystem::exists(source_file)) {
             ++cached_before;
+            inventoried_batch_bytes += bgpstream_runner::safe_file_size(source_file);
             if (bgpstream_runner::inspect_parsed_cache(source_file).state ==
                 bgpstream_runner::ParsedCacheState::Valid) {
                 ++parsed_before;
             }
         }
+
+        ++inventoried_batch_files;
+        if (inventoried_batch_files >= inventory_update_interval) {
+            inventory_progress->mark_batch_completed(inventoried_batch_files,
+                                                      inventoried_batch_bytes);
+            inventoried_batch_files = 0;
+            inventoried_batch_bytes = 0;
+        }
     }
+    if (inventoried_batch_files > 0) {
+        inventory_progress->mark_batch_completed(inventoried_batch_files,
+                                                  inventoried_batch_bytes);
+    }
+    inventory_progress->finish();
 
     std::cout << "download-and-preparse source: " << config.project << '/' << config.collector << '\n'
               << "date_range: " << config.start_date << " through " << config.end_date << " (inclusive)\n"
