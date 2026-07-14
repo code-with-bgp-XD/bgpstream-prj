@@ -114,6 +114,8 @@ RangeProcessingStats ChunkEngine::run() {
     std::uint64_t total_bytes = 0;
     int remaining_limit = config_.limit;
     std::vector<std::string> unavailable_files;
+    FileProgressDisplay plan_progress(chunks.size(), 0, "analysis-plan", "chunks", false);
+    std::size_t completed_plan_chunks = 0;
 
     for (const ClosedDateRange &chunk : chunks) {
         if (remaining_limit == 0) {
@@ -156,7 +158,13 @@ RangeProcessingStats ChunkEngine::run() {
             }
         }
         planned_chunks.push_back(std::move(planned_chunk));
+        plan_progress.mark_batch_completed(1, 0);
+        ++completed_plan_chunks;
     }
+    if (completed_plan_chunks < chunks.size()) {
+        plan_progress.mark_batch_completed(chunks.size() - completed_plan_chunks, 0);
+    }
+    plan_progress.finish();
 
     if (!unavailable_files.empty()) {
         std::ostringstream message;
