@@ -113,7 +113,6 @@ RangeProcessingStats ChunkEngine::run() {
     std::size_t total_files = 0;
     std::uint64_t total_bytes = 0;
     int remaining_limit = config_.limit;
-    std::vector<std::string> unavailable_files;
     FileProgressDisplay plan_progress(chunks.size(), 0, "analysis-plan", "chunks", false);
     std::size_t completed_plan_chunks = 0;
 
@@ -132,23 +131,13 @@ RangeProcessingStats ChunkEngine::run() {
         // traversal applies a different time filter, so count every planned target.
         total_files += planned_chunk.targets.size();
         for (const DownloadTarget &target : planned_chunk.targets) {
-            std::filesystem::path source_file;
-            if (std::filesystem::exists(target.local_path)) {
-                source_file = target.local_path;
-            } else if (std::filesystem::exists(target.destination_path)) {
-                source_file = target.destination_path;
-            } else {
-                unavailable_files.push_back("source MRT missing: " + target.destination_path.string());
-                continue;
-            }
-
-            const ParsedCacheInspection inspection = inspect_parsed_cache(source_file);
-            if (inspection.state != ParsedCacheState::Valid) {
-                unavailable_files.push_back(inspection.cache_path.string() + " | " + inspection.reason);
-                continue;
-            }
+            // Download mode owns the separate cache-validation pass. Analysis
+            // lets the reader consume each cache once without a preflight scan.
+            std::filesystem::path source_file = std::filesystem::exists(target.local_path)
+                                                    ? target.local_path
+                                                    : target.destination_path;
+            total_bytes += safe_file_size(parsed_cache_path(source_file));
             planned_chunk.source_files.push_back(std::move(source_file));
-            total_bytes += safe_file_size(inspection.cache_path);
         }
 
         if (remaining_limit > 0) {
@@ -165,23 +154,6 @@ RangeProcessingStats ChunkEngine::run() {
         plan_progress.mark_batch_completed(chunks.size() - completed_plan_chunks, 0);
     }
     plan_progress.finish();
-
-    if (!unavailable_files.empty()) {
-        std::ostringstream message;
-        message << "Analysis requires complete source MRT files and parsed caches; no files were downloaded or "
-                   "generated. Missing or invalid entries: "
-                << unavailable_files.size();
-        const std::size_t displayed_count = std::min<std::size_t>(unavailable_files.size(), 8);
-        for (std::size_t index = 0; index < displayed_count; ++index) {
-            message << "\n  " << unavailable_files[index];
-        }
-        if (unavailable_files.size() > displayed_count) {
-            message << "\n  ... and " << unavailable_files.size() - displayed_count << " more";
-        }
-        message << "\nRun ./manage.sh download (or download-release) to download missing MRT files and "
-                   "generate parsed caches.";
-        throw std::runtime_error(message.str());
-    }
 
     std::unique_ptr<FileProgressDisplay> progress;
     if (total_files > 0) {
