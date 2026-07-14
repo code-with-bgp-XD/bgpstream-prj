@@ -5,7 +5,7 @@
 当前架构分成三层：
 
 1. C++ 下载层
-   使用 `libcurl` 负责远端资源发现、HTTPS 下载、断点续传、并发、重试和文件落盘。Route Views collector 直接使用官方归档地址，其他 collector 通过 CAIDA Broker API 发现资源。
+   使用 `libcurl` 负责远端资源发现、HTTPS 下载、断点续传、并发、重试和文件落盘。Route Views collector 从官方归档月目录发现实际文件，其他 collector 通过 CAIDA Broker API 发现资源。
 
 2. C++ MRT 预解析与二进制缓存层
    下载模式使用 `libBGPStream` 将每个原始 MRT 文件完整解析一次，按 `(timestamp, timestamp_microseconds)` 和原始读取序号稳定排序，再写入带 schema 版本、源文件指纹、分块校验和的 `.bgpcache` 文件。系统存在 `libzstd.so.1` 时自动使用 Zstd 压缩，否则写入未压缩分块。
@@ -162,8 +162,10 @@ bgpdata/routeviews/route-views.sg/updates/
 
 - `cpp/include/bgpstream_runner/download_client.h`
   `cpp/src/download_client.cpp`
+  `cpp/src/routeviews_archive.h`
+  `cpp/src/routeviews_archive.cpp`
   完整实现资源发现和下载，不启动任何外部脚本或子进程。职责包括：
-  - 生成 Route Views 归档 URL，或调用 CAIDA Broker API 并解析 JSON 资源清单
+  - 解析 Route Views 官方月目录中的实际归档文件，或调用 CAIDA Broker API 并解析 JSON 资源清单
   - 使用 `libcurl` 完成 HTTPS、重定向、代理、TLS 证书校验和超时控制
   - 按 `cache.download_workers` 创建并发下载线程
   - 用 `.part` 文件处理断点续传、远端大小校验和最终原子改名
@@ -456,6 +458,8 @@ cp config.example.json config.json
   只删除 `parsed-cache/` 下由程序生成的 `.bgpcache`、写入临时文件和排序临时文件，保留所有原始 MRT。
 
 `download` 和 `download-release` 不加载处理器插件，也不执行业务分析。它们先复用或下载原始 MRT，再并行生成解析缓存。网络中断或进程停止后会保留下载 `.part`；强制终止预解析可能留下 `.bgpcache.part` 或 `.bgpcache.sort.part`，可由 `cache-clear` 安全清理。完整原始 MRT 不会被删除。结束日期为包含式。
+
+Route Views 模式以官方 `UPDATES/` 月目录列出的文件为准，不再假定每个 15 分钟整刻都存在固定文件名。归档本身缺失的时间片不会被误报成下载失败；类似 `08:14`、`03:51` 的非整刻文件仍会被发现和处理。目录中已经列出但实际下载失败的文件仍按严格模式重试并报告错误。
 
 分析读取每个分块时还会验证解压结果和校验和。如果出现罕见的缓存内容损坏，可执行 `cache-clear` 后重新运行 `download`；该操作只重建派生缓存，不会删除原始 MRT。
 

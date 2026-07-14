@@ -35,6 +35,7 @@ add_library(
   cpp/src/common.cpp
   cpp/src/config_file.cpp
   cpp/src/download_client.cpp
+  cpp/src/routeviews_archive.cpp
   cpp/src/mrt_parser.cpp
   cpp/src/parsed_cache.cpp
   cpp/src/chunk_engine.cpp
@@ -104,6 +105,11 @@ if(BUILD_TESTING)
   add_executable(parsed_cache_test tests/parsed_cache_test.cpp)
   target_link_libraries(parsed_cache_test PRIVATE bgpstream_runner_core)
   add_test(NAME parsed_cache_round_trip COMMAND parsed_cache_test)
+
+  add_executable(routeviews_archive_test tests/routeviews_archive_test.cpp)
+  target_include_directories(routeviews_archive_test PRIVATE cpp/src)
+  target_link_libraries(routeviews_archive_test PRIVATE bgpstream_runner_core)
+  add_test(NAME routeviews_archive_discovery COMMAND routeviews_archive_test)
 endif()
 
 add_subdirectory(examples)

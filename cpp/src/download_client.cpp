@@ -10,9 +10,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
-#include <ctime>
 #include <filesystem>
-#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -28,6 +26,7 @@
 #include <vector>
 
 #include "bgpstream_runner/common.h"
+#include "routeviews_archive.h"
 
 namespace bgpstream_runner {
 
@@ -625,33 +624,56 @@ std::vector<Resource> fetch_resources_via_broker(const ClosedDateRange &range, c
     return resources;
 }
 
-std::string format_archive_timestamp(std::time_t epoch, const char *format) {
-    std::tm utc{};
-    if (gmtime_r(&epoch, &utc) == nullptr) {
-        throw std::runtime_error("Failed to format Route Views archive timestamp");
+std::vector<routeviews_archive::UpdateEntry> fetch_routeviews_month_index(const std::string &index_url) {
+    static std::mutex cache_mutex;
+    static std::map<std::string, std::vector<routeviews_archive::UpdateEntry>> cache;
+
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        const auto cached = cache.find(index_url);
+        if (cached != cache.end()) {
+            return cached->second;
+        }
     }
-    std::ostringstream output;
-    output << std::put_time(&utc, format);
-    return output.str();
+
+    std::vector<routeviews_archive::UpdateEntry> entries =
+        routeviews_archive::parse_updates_index(fetch_text(index_url));
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        const auto [cached, inserted] = cache.emplace(index_url, entries);
+        if (!inserted) {
+            return cached->second;
+        }
+    }
+    return entries;
 }
 
 std::vector<Resource> fetch_resources_via_routeviews_direct(const ClosedDateRange &range, const Config &config) {
-    constexpr std::time_t kSlotSeconds = 15 * 60;
-    const std::time_t first_slot = (range.start_epoch / kSlotSeconds) * kSlotSeconds - kSlotSeconds;
-    const std::time_t last_slot = (range.end_exclusive_epoch / kSlotSeconds) * kSlotSeconds;
+    std::vector<routeviews_archive::UpdateEntry> entries;
+    std::map<std::string, std::string> entry_urls;
+    for (const std::string &month : routeviews_archive::months_for_range(range)) {
+        const std::string index_url = std::string(kRouteViewsArchiveBaseUrl) + "/" + config.collector +
+                                      "/bgpdata/" + month + "/UPDATES/";
+        const std::vector<routeviews_archive::UpdateEntry> month_entries =
+            fetch_routeviews_month_index(index_url);
+        entries.insert(entries.end(), month_entries.begin(), month_entries.end());
+        for (const routeviews_archive::UpdateEntry &entry : month_entries) {
+            entry_urls.try_emplace(entry.filename, index_url + entry.filename);
+        }
+    }
+
+    entries = routeviews_archive::select_updates_for_range(std::move(entries), range);
 
     std::vector<Resource> resources;
-    for (std::time_t slot = first_slot; slot <= last_slot; slot += kSlotSeconds) {
-        const std::string month = format_archive_timestamp(slot, "%Y.%m");
-        const std::string timestamp = format_archive_timestamp(slot, "%Y%m%d.%H%M");
+    resources.reserve(entries.size());
+    for (const routeviews_archive::UpdateEntry &entry : entries) {
         resources.push_back(Resource{
-            std::string(kRouteViewsArchiveBaseUrl) + "/" + config.collector + "/bgpdata/" + month +
-                "/UPDATES/updates." + timestamp + ".bz2",
+            entry_urls.at(entry.filename),
             "routeviews",
             config.collector,
             kRecordType,
-            static_cast<std::int64_t>(slot),
-            static_cast<std::int64_t>(kSlotSeconds),
+            static_cast<std::int64_t>(entry.initial_time),
+            static_cast<std::int64_t>(routeviews_archive::kUpdateDurationSeconds),
             0,
         });
     }
@@ -1021,7 +1043,7 @@ std::vector<FailedDownload> run_download_round(std::vector<Resource> *resources,
 
 std::string solution_hint(const FailedDownload &failure) {
     if (failure.http_status == 404) {
-        return "建议: 确认 collector 和时间范围；该归档时间片也可能本来就不存在。";
+        return "建议: 资源清单列出了该文件，但服务器返回 404；上游目录或镜像可能暂时不一致，请稍后重试。";
     }
     if (failure.http_status == 429 || failure.http_status == 500 || failure.http_status == 502 ||
         failure.http_status == 503 || failure.http_status == 504) {
