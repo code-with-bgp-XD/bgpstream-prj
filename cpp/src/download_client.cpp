@@ -699,7 +699,9 @@ std::string filename_from_url(const std::string &url) {
 }
 
 std::filesystem::path destination_path(const std::filesystem::path &base_dir, const Resource &resource) {
-    return base_dir / resource.project / resource.collector / resource.record_type / filename_from_url(resource.url);
+    return base_dir / resource.project / resource.collector / resource.record_type /
+           utc_year_month_path(static_cast<std::time_t>(resource.initial_time)) /
+           filename_from_url(resource.url);
 }
 
 std::filesystem::path partial_path(const std::filesystem::path &destination) {
@@ -710,7 +712,8 @@ std::filesystem::path cache_artifact_path(const std::filesystem::path &base_dir,
     std::ostringstream filename;
     filename << resource.project << '.' << resource.collector << '.' << resource.record_type << '.'
              << resource.initial_time << '.' << resource.duration << ".cache";
-    return base_dir / resource.project / resource.collector / resource.record_type / filename.str();
+    return base_dir / resource.project / resource.collector / resource.record_type /
+           utc_year_month_path(static_cast<std::time_t>(resource.initial_time)) / filename.str();
 }
 
 std::filesystem::path preferred_local_path(const std::filesystem::path &base_dir, const Resource &resource) {

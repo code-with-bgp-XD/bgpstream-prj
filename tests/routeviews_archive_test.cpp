@@ -6,6 +6,7 @@
 #include <utility>
 #include <vector>
 
+#include "bgpstream_runner/common.h"
 #include "routeviews_archive.h"
 
 namespace {
@@ -81,6 +82,15 @@ void test_month_enumeration() {
             "full-year range did not cover both boundary months");
 }
 
+void test_local_cache_month_path() {
+    using bgpstream_runner::utc_year_month_path;
+
+    require(utc_year_month_path(utc_epoch(2025, 1, 1)).generic_string() == "2025/01",
+            "January cache path did not use YYYY/MM hierarchy");
+    require(utc_year_month_path(utc_epoch(2024, 12, 31, 23, 45)).generic_string() == "2024/12",
+            "cache path did not use the resource's UTC month");
+}
+
 void test_range_selection() {
     using bgpstream_runner::routeviews_archive::select_updates_for_range;
 
@@ -113,6 +123,7 @@ int main() {
         test_filename_parser();
         test_directory_index_parser();
         test_month_enumeration();
+        test_local_cache_month_path();
         test_range_selection();
         std::cout << "Route Views archive discovery tests passed\n";
         return 0;

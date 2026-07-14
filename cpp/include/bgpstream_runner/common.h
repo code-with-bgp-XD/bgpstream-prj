@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <ctime>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -58,6 +59,7 @@ std::uint64_t safe_file_size(const std::filesystem::path &file_path);
 std::uint64_t total_file_bytes(const std::vector<std::filesystem::path> &files);
 ClosedDateRange parse_closed_date_range(const Config &config);
 std::string format_utc_timestamp(std::time_t epoch);
+std::filesystem::path utc_year_month_path(std::time_t epoch);
 std::vector<ClosedDateRange> split_range_by_chunks(const ClosedDateRange &range, int chunk_size, ChunkUnit chunk_unit);
 std::string_view chunk_unit_to_string(ChunkUnit chunk_unit);
 std::string format_range_label(const ClosedDateRange &range);

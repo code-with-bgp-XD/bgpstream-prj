@@ -37,9 +37,11 @@
 
 ```text
 bgpdata/routeviews/route-views.sg/updates/
-├── updates.20250101.0000.bz2
-└── parsed-cache/
-    └── updates.20250101.0000.bz2.bgpcache
+└── 2025/
+    └── 01/
+        ├── updates.20250101.0000.bz2
+        └── parsed-cache/
+            └── updates.20250101.0000.bz2.bgpcache
 ```
 
 ---
@@ -605,7 +607,7 @@ cp config.example.json config.json
   当前仓库已经注册了多个 `examples/` 示例插件，所以实际使用时应当在根目录 `config.json` 里显式填写这个字段。
 
 - `cache.output_dir`
-  下载和分析共用的固定本地缓存根目录。相对路径以仓库根目录为基准，实际 update 文件会落在类似 `cache.output_dir/project/collector/updates/` 的路径下。
+  下载和分析共用的固定本地缓存根目录。相对路径以仓库根目录为基准，实际 update 文件会按 UTC 年月落在类似 `cache.output_dir/project/collector/updates/YYYY/MM/` 的路径下；对应解析缓存位于该月目录的 `parsed-cache/` 子目录。
 
 - `cache.download_workers`
   下载阶段的并发线程数。值越大，单分片下载速度通常越快，但也会增加网络和上游服务压力。

@@ -623,6 +623,19 @@ std::string format_utc_timestamp(std::time_t epoch) {
     return output.str();
 }
 
+std::filesystem::path utc_year_month_path(std::time_t epoch) {
+    std::tm tm{};
+    if (gmtime_r(&epoch, &tm) == nullptr) {
+        throw std::runtime_error("Failed to determine UTC year and month");
+    }
+
+    std::ostringstream year;
+    year << std::setfill('0') << std::setw(4) << tm.tm_year + 1900;
+    std::ostringstream month;
+    month << std::setfill('0') << std::setw(2) << tm.tm_mon + 1;
+    return std::filesystem::path(year.str()) / month.str();
+}
+
 std::vector<ClosedDateRange> split_range_by_chunks(const ClosedDateRange &range, int chunk_size, ChunkUnit chunk_unit) {
     std::vector<ClosedDateRange> chunks;
     for (std::time_t chunk_start = range.start_epoch; chunk_start < range.end_exclusive_epoch;) {
