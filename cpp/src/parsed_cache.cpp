@@ -1,10 +1,15 @@
 #include "bgpstream_runner/parsed_cache.h"
 
 #include <dlfcn.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <cstring>
 #include <fstream>
 #include <limits>
@@ -24,6 +29,7 @@ namespace {
 constexpr std::array<char, 8> kCacheMagic{{'B', 'G', 'P', 'C', 'A', 'C', 'H', '1'}};
 constexpr std::uint32_t kCodecNone = 0;
 constexpr std::uint32_t kCodecZstd = 1;
+constexpr std::uint32_t kOrderingTimestampStable = 1;
 constexpr std::uint32_t kBlockMarker = 0x314b4c42U;   // BLK1 in little endian.
 constexpr std::uint32_t kFooterMarker = 0x31544f46U;  // FOT1 in little endian.
 constexpr std::uint64_t kMaximumBlockBytes = std::uint64_t{1} << 30;
@@ -205,6 +211,7 @@ class ByteWriter {
 
     const std::vector<std::uint8_t> &bytes() const noexcept { return bytes_; }
     std::size_t size() const noexcept { return bytes_.size(); }
+    void clear() noexcept { bytes_.clear(); }
 
    private:
     std::vector<std::uint8_t> bytes_;
@@ -506,6 +513,195 @@ Enum read_enum(ByteReader *input, std::uint8_t maximum, const char *name) {
     return static_cast<Enum>(value);
 }
 
+struct MessageTimestampKey {
+    std::int64_t seconds = 0;
+    std::uint32_t microseconds = 0;
+};
+
+bool timestamp_less(const MessageTimestampKey &left, const MessageTimestampKey &right) noexcept {
+    return left.seconds < right.seconds ||
+           (left.seconds == right.seconds && left.microseconds < right.microseconds);
+}
+
+struct EncodedMessageMetadata {
+    BGPMessageType type = BGPMessageType::Unknown;
+    MessageTimestampKey timestamp;
+};
+
+EncodedMessageMetadata inspect_encoded_message(ByteReader input) {
+    EncodedMessageMetadata metadata;
+    metadata.type = read_enum<BGPMessageType>(
+        &input, static_cast<std::uint8_t>(BGPMessageType::Unknown), "message type");
+    (void)read_enum<BGPRecordType>(&input, static_cast<std::uint8_t>(BGPRecordType::Unknown),
+                                   "record type");
+    (void)read_enum<BGPRecordStatus>(&input, static_cast<std::uint8_t>(BGPRecordStatus::Unknown),
+                                     "record status");
+    metadata.timestamp.seconds = input.i64();
+    metadata.timestamp.microseconds = input.u32();
+    return metadata;
+}
+
+struct SortEntry {
+    std::int64_t timestamp = 0;
+    std::uint64_t offset = 0;
+    std::uint32_t encoded_size = 0;
+    std::uint32_t timestamp_microseconds = 0;
+};
+
+class ReadOnlyFileMapping {
+   public:
+    ReadOnlyFileMapping(const std::filesystem::path &path, std::uint64_t expected_size)
+        : path_(path) {
+        if (expected_size > std::numeric_limits<std::size_t>::max()) {
+            throw ParsedCacheFailure("Sort spool is too large to map: " + path.string());
+        }
+        fd_ = ::open(path.c_str(), O_RDONLY);
+        if (fd_ < 0) {
+            throw ParsedCacheFailure("Failed to open sort spool " + path.string() + ": " +
+                                     std::strerror(errno));
+        }
+
+        struct stat file_stat {};
+        if (::fstat(fd_, &file_stat) != 0) {
+            const int error = errno;
+            close_fd();
+            throw ParsedCacheFailure("Failed to stat sort spool " + path.string() + ": " +
+                                     std::strerror(error));
+        }
+        if (file_stat.st_size < 0 || static_cast<std::uint64_t>(file_stat.st_size) != expected_size) {
+            close_fd();
+            throw ParsedCacheFailure("Sort spool size changed unexpectedly: " + path.string());
+        }
+
+        size_ = static_cast<std::size_t>(expected_size);
+        if (size_ == 0) {
+            return;
+        }
+        mapping_ = ::mmap(nullptr, size_, PROT_READ, MAP_PRIVATE, fd_, 0);
+        if (mapping_ == MAP_FAILED) {
+            const int error = errno;
+            close_fd();
+            throw ParsedCacheFailure("Failed to map sort spool " + path.string() + ": " +
+                                     std::strerror(error));
+        }
+    }
+
+    ~ReadOnlyFileMapping() {
+        if (mapping_ != MAP_FAILED) {
+            ::munmap(mapping_, size_);
+        }
+        close_fd();
+    }
+
+    ReadOnlyFileMapping(const ReadOnlyFileMapping &) = delete;
+    ReadOnlyFileMapping &operator=(const ReadOnlyFileMapping &) = delete;
+
+    const std::uint8_t *data() const noexcept {
+        return mapping_ == MAP_FAILED ? nullptr : static_cast<const std::uint8_t *>(mapping_);
+    }
+    std::size_t size() const noexcept { return size_; }
+
+   private:
+    void close_fd() noexcept {
+        if (fd_ >= 0) {
+            ::close(fd_);
+            fd_ = -1;
+        }
+    }
+
+    std::filesystem::path path_;
+    int fd_ = -1;
+    void *mapping_ = MAP_FAILED;
+    std::size_t size_ = 0;
+};
+
+class SortedMessageSpool {
+   public:
+    explicit SortedMessageSpool(const std::filesystem::path &cache_path)
+        : path_(cache_path.string() + ".sort.part") {
+        output_.open(path_, std::ios::binary | std::ios::trunc);
+        if (!output_) {
+            throw ParsedCacheFailure("Failed to create message sort spool: " + path_.string());
+        }
+    }
+
+    ~SortedMessageSpool() {
+        output_.close();
+        std::error_code remove_error;
+        std::filesystem::remove(path_, remove_error);
+    }
+
+    SortedMessageSpool(const SortedMessageSpool &) = delete;
+    SortedMessageSpool &operator=(const SortedMessageSpool &) = delete;
+
+    void append(const std::vector<BGPMessage> &messages) {
+        if (closed_) {
+            throw ParsedCacheFailure("Cannot append to a closed message sort spool");
+        }
+        if (messages.empty()) {
+            return;
+        }
+
+        ByteWriter encoded_batch;
+        for (const BGPMessage &message : messages) {
+            ByteWriter encoded_message;
+            encode_message(message, &encoded_message);
+            if (encoded_message.size() > std::numeric_limits<std::uint32_t>::max()) {
+                throw ParsedCacheFailure("One BGP message exceeds the parsed-cache format limit");
+            }
+            if (encoded_batch.size() > std::numeric_limits<std::uint64_t>::max() - spool_size_) {
+                throw ParsedCacheFailure("Message sort spool exceeds the supported size");
+            }
+            const std::uint64_t offset = spool_size_ + encoded_batch.size();
+            if (encoded_message.size() > std::numeric_limits<std::uint64_t>::max() - offset) {
+                throw ParsedCacheFailure("Message sort spool exceeds the supported size");
+            }
+            entries_.push_back(SortEntry{
+                static_cast<std::int64_t>(message.timestamp),
+                offset,
+                static_cast<std::uint32_t>(encoded_message.size()),
+                message.timestamp_microseconds,
+            });
+            encoded_batch.append(encoded_message.bytes().data(), encoded_message.size());
+        }
+        write_bytes(output_, encoded_batch.bytes().data(), encoded_batch.size(), path_);
+        spool_size_ += encoded_batch.size();
+    }
+
+    void close_and_sort() {
+        if (closed_) {
+            return;
+        }
+        output_.flush();
+        require_output(output_, path_);
+        output_.close();
+        if (!output_) {
+            throw ParsedCacheFailure("Failed to close message sort spool: " + path_.string());
+        }
+        closed_ = true;
+        std::sort(entries_.begin(), entries_.end(), [](const SortEntry &left, const SortEntry &right) {
+            if (left.timestamp != right.timestamp) {
+                return left.timestamp < right.timestamp;
+            }
+            if (left.timestamp_microseconds != right.timestamp_microseconds) {
+                return left.timestamp_microseconds < right.timestamp_microseconds;
+            }
+            return left.offset < right.offset;
+        });
+    }
+
+    const std::filesystem::path &path() const noexcept { return path_; }
+    const std::vector<SortEntry> &entries() const noexcept { return entries_; }
+    std::uint64_t size() const noexcept { return spool_size_; }
+
+   private:
+    std::filesystem::path path_;
+    std::ofstream output_;
+    std::vector<SortEntry> entries_;
+    std::uint64_t spool_size_ = 0;
+    bool closed_ = false;
+};
+
 BGPMessage decode_message(ByteReader *input, BGPMessageFields fields, const std::string &source_file) {
     BGPMessage message;
     const BGPMessageType type = read_enum<BGPMessageType>(
@@ -738,8 +934,18 @@ bool same_stats(const MessageTraversalStats &left, const MessageTraversalStats &
            left.end_of_rib_messages == right.end_of_rib_messages;
 }
 
+void add_stats(MessageTraversalStats *destination, const MessageTraversalStats &source) {
+    destination->visited_messages += source.visited_messages;
+    destination->rib_messages += source.rib_messages;
+    destination->announcement_messages += source.announcement_messages;
+    destination->withdrawal_messages += source.withdrawal_messages;
+    destination->peer_state_messages += source.peer_state_messages;
+    destination->end_of_rib_messages += source.end_of_rib_messages;
+}
+
 struct CacheHeader {
     std::uint32_t codec = kCodecNone;
+    std::uint32_t ordering = kOrderingTimestampStable;
     std::uint64_t fields = 0;
     std::uint64_t source_size = 0;
     std::int64_t source_mtime = 0;
@@ -751,6 +957,7 @@ void write_header(std::ostream &output, const std::filesystem::path &output_path
     write_bytes(output, kCacheMagic.data(), kCacheMagic.size(), output_path);
     write_u32(output, kParsedCacheSchemaVersion, output_path);
     write_u32(output, header.codec, output_path);
+    write_u32(output, header.ordering, output_path);
     write_u64(output, header.fields, output_path);
     write_u64(output, header.source_size, output_path);
     write_i64(output, header.source_mtime, output_path);
@@ -776,6 +983,11 @@ CacheHeader read_header(std::istream &input, const std::filesystem::path &cache_
     }
     if (header.codec == kCodecZstd && !ZstdApi::instance().available()) {
         throw ParsedCacheFailure("Parsed cache requires libzstd.so.1: " + cache_path.string());
+    }
+    header.ordering = read_u32(input, cache_path);
+    if (header.ordering != kOrderingTimestampStable) {
+        throw ParsedCacheFailure("Parsed cache does not guarantee stable timestamp ordering: " +
+                                 cache_path.string());
     }
     header.fields = read_u64(input, cache_path);
     header.source_size = read_u64(input, cache_path);
@@ -911,6 +1123,7 @@ struct ParsedCacheWriter::Impl {
           partial_path(output_path.parent_path() / (output_path.filename().string() + ".part")) {
         const CacheHeader header{
             ZstdApi::instance().available() ? kCodecZstd : kCodecNone,
+            kOrderingTimestampStable,
             static_cast<std::uint64_t>(kAllBGPMessageFields),
             require_source_size(source_file),
             file_mtime_ticks(source_file),
@@ -951,23 +1164,55 @@ struct ParsedCacheWriter::Impl {
             }
             payload.u32(static_cast<std::uint32_t>(encoded_message.size()));
             payload.append(encoded_message.bytes().data(), encoded_message.size());
-            record_message_type(message.type, &stats);
+        }
+        append_serialized_block(payload.bytes(), static_cast<std::uint32_t>(messages.size()));
+    }
+
+    void append_serialized_block(const std::vector<std::uint8_t> &payload,
+                                 std::uint32_t message_count) {
+        if (finalized) {
+            throw ParsedCacheFailure("Cannot append to a finalized parsed cache");
+        }
+        if (message_count == 0) {
+            if (!payload.empty()) {
+                throw ParsedCacheFailure("Parsed-cache block has data but no messages");
+            }
+            return;
         }
         if (payload.size() > kMaximumBlockBytes) {
             throw ParsedCacheFailure("Parsed-cache block exceeds the maximum supported size");
         }
 
+        MessageTraversalStats block_stats;
+        std::optional<MessageTimestampKey> block_last_timestamp = last_timestamp;
+        ByteReader framed(payload.data(), payload.size(), partial_path.string() + " pending block");
+        for (std::uint32_t index = 0; index < message_count; ++index) {
+            const std::uint32_t encoded_size = framed.u32();
+            ByteReader encoded = framed.subreader(encoded_size, " message " + std::to_string(index));
+            const EncodedMessageMetadata metadata = inspect_encoded_message(encoded);
+            if (block_last_timestamp.has_value() &&
+                timestamp_less(metadata.timestamp, *block_last_timestamp)) {
+                throw ParsedCacheFailure("Parsed-cache messages are not ordered by timestamp: " +
+                                         source_file.string());
+            }
+            block_last_timestamp = metadata.timestamp;
+            record_message_type(metadata.type, &block_stats);
+        }
+        framed.require_empty();
+
         const std::vector<std::uint8_t> stored =
-            codec == kCodecZstd ? ZstdApi::instance().compress(payload.bytes()) : payload.bytes();
+            codec == kCodecZstd ? ZstdApi::instance().compress(payload) : payload;
         if (stored.size() > kMaximumBlockBytes) {
             throw ParsedCacheFailure("Stored parsed-cache block exceeds the maximum supported size");
         }
         write_u32(output, kBlockMarker, partial_path);
-        write_u32(output, static_cast<std::uint32_t>(messages.size()), partial_path);
+        write_u32(output, message_count, partial_path);
         write_u64(output, payload.size(), partial_path);
         write_u64(output, stored.size(), partial_path);
-        write_u64(output, checksum64(payload.bytes()), partial_path);
+        write_u64(output, checksum64(payload), partial_path);
         write_bytes(output, stored.data(), stored.size(), partial_path);
+        add_stats(&stats, block_stats);
+        last_timestamp = block_last_timestamp;
     }
 
     void finalize() {
@@ -998,6 +1243,7 @@ struct ParsedCacheWriter::Impl {
     std::ofstream output;
     std::uint32_t codec = kCodecNone;
     MessageTraversalStats stats;
+    std::optional<MessageTimestampKey> last_timestamp;
     bool finalized = false;
 };
 
@@ -1017,9 +1263,49 @@ const std::filesystem::path &ParsedCacheWriter::output_path() const noexcept { r
 MessageTraversalStats generate_parsed_cache(const Config &config, const std::filesystem::path &source_file,
                                             std::size_t message_batch_size) {
     ParsedCacheWriter writer(source_file);
+    SortedMessageSpool spool(writer.output_path());
     const MessageTraversalStats parsed_stats =
         traverse_mrt_file(config, source_file, kAllBGPMessageFields, message_batch_size, std::nullopt,
-                          [&](std::vector<BGPMessage> &messages) { writer.append(messages); });
+                          [&](std::vector<BGPMessage> &messages) { spool.append(messages); });
+    spool.close_and_sort();
+    if (spool.entries().size() != parsed_stats.visited_messages) {
+        throw ParsedCacheFailure("Message sort index count does not match MRT parser count for " +
+                                 source_file.string());
+    }
+
+    const ReadOnlyFileMapping mapping(spool.path(), spool.size());
+    ByteWriter payload;
+    std::uint32_t block_message_count = 0;
+    auto flush_block = [&]() {
+        if (block_message_count == 0) {
+            return;
+        }
+        writer.impl_->append_serialized_block(payload.bytes(), block_message_count);
+        payload.clear();
+        block_message_count = 0;
+    };
+
+    for (const SortEntry &entry : spool.entries()) {
+        if (entry.offset > mapping.size() || entry.encoded_size > mapping.size() - entry.offset) {
+            throw ParsedCacheFailure("Message sort index points outside its spool for " +
+                                     source_file.string());
+        }
+        const std::uint64_t framed_size = sizeof(std::uint32_t) + entry.encoded_size;
+        if (framed_size > kMaximumBlockBytes) {
+            throw ParsedCacheFailure("One BGP message exceeds the parsed-cache block size limit");
+        }
+        if (block_message_count > 0 &&
+            (block_message_count == std::numeric_limits<std::uint32_t>::max() ||
+             block_message_count >= message_batch_size ||
+             payload.size() > kMaximumBlockBytes - framed_size)) {
+            flush_block();
+        }
+        payload.u32(entry.encoded_size);
+        payload.append(mapping.data() + static_cast<std::size_t>(entry.offset), entry.encoded_size);
+        ++block_message_count;
+    }
+    flush_block();
+
     if (!same_stats(parsed_stats, writer.stats())) {
         throw ParsedCacheFailure("Parsed-cache writer message counts do not match MRT parser counts for " +
                                  source_file.string());
@@ -1062,6 +1348,7 @@ MessageTraversalStats read_parsed_cache(const std::filesystem::path &source_file
     };
 
     std::uint64_t block_index = 0;
+    std::optional<MessageTimestampKey> previous_cache_timestamp;
     while (true) {
         const std::uint32_t marker = read_u32(input, cache_path);
         if (marker == kFooterMarker) {
@@ -1103,24 +1390,25 @@ MessageTraversalStats read_parsed_cache(const std::filesystem::path &source_file
         for (std::uint32_t message_index = 0; message_index < message_count; ++message_index) {
             const std::uint32_t encoded_size = payload.u32();
             ByteReader encoded = payload.subreader(encoded_size, " message " + std::to_string(message_index));
-            ByteReader probe = encoded;
-            const BGPMessageType type = read_enum<BGPMessageType>(
-                &probe, static_cast<std::uint8_t>(BGPMessageType::Unknown), "message type");
-            (void)read_enum<BGPRecordType>(&probe, static_cast<std::uint8_t>(BGPRecordType::Unknown),
-                                           "record type");
-            (void)read_enum<BGPRecordStatus>(&probe, static_cast<std::uint8_t>(BGPRecordStatus::Unknown),
-                                             "record status");
-            const std::int64_t timestamp = probe.i64();
-            record_message_type(type, &complete_stats);
+            const EncodedMessageMetadata metadata = inspect_encoded_message(encoded);
+            if (previous_cache_timestamp.has_value() &&
+                timestamp_less(metadata.timestamp, *previous_cache_timestamp)) {
+                throw ParsedCacheFailure("Parsed cache is not ordered by timestamp; regenerate it: " +
+                                         cache_path.string());
+            }
+            previous_cache_timestamp = metadata.timestamp;
+            record_message_type(metadata.type, &complete_stats);
 
             const bool in_range = !range.has_value() ||
-                                  (static_cast<std::int64_t>(range->start_epoch) <= timestamp &&
-                                   timestamp < static_cast<std::int64_t>(range->end_exclusive_epoch));
+                                  (static_cast<std::int64_t>(range->start_epoch) <=
+                                       metadata.timestamp.seconds &&
+                                   metadata.timestamp.seconds <
+                                       static_cast<std::int64_t>(range->end_exclusive_epoch));
             if (!in_range) {
                 continue;
             }
             batch.push_back(decode_message(&encoded, fields, current_source_file));
-            record_message_type(type, &delivered_stats);
+            record_message_type(metadata.type, &delivered_stats);
             if (batch.size() >= message_batch_size) {
                 flush_batch();
             }

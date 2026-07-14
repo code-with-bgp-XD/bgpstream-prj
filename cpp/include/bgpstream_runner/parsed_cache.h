@@ -12,7 +12,7 @@
 
 namespace bgpstream_runner {
 
-inline constexpr std::uint32_t kParsedCacheSchemaVersion = 1;
+inline constexpr std::uint32_t kParsedCacheSchemaVersion = 2;
 
 class ParsedCacheFailure : public std::runtime_error {
    public:
@@ -57,6 +57,10 @@ class ParsedCacheWriter {
     const std::filesystem::path &output_path() const noexcept;
 
    private:
+    friend MessageTraversalStats generate_parsed_cache(const Config &config,
+                                                        const std::filesystem::path &source_file,
+                                                        std::size_t message_batch_size);
+
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

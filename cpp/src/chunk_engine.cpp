@@ -231,6 +231,8 @@ void ChunkEngine::print_summary(std::ostream &out, const RangeProcessingStats &s
     out << "data_dir: " << std::filesystem::absolute(data_dir).string() << '\n';
     out << "input_mode: parsed-cache-only\n";
     out << "parsed_cache_schema_version: " << kParsedCacheSchemaVersion << '\n';
+    out << "parsed_cache_order: timestamp-ascending-stable\n";
+    out << "analysis_time_sorting: false\n";
     out << "automatic_downloads: false\n";
     out << "original_file_eviction: disabled\n";
     out << "parser_workers: " << config_.parser_workers << '\n';
@@ -356,23 +358,33 @@ void ChunkEngine::dispatch_message_batch(std::vector<BGPMessage> &messages, std:
         const auto timestamp_of = [](const BGPMessage &message) {
             return MessageTimestamp{message.timestamp, message.timestamp_microseconds};
         };
-        std::stable_sort(messages.begin(), messages.end(), [&](const BGPMessage &left, const BGPMessage &right) {
-            return timestamp_of(left) < timestamp_of(right);
-        });
+        const auto throw_order_error = [&](const MessageTimestamp &current,
+                                           const MessageTimestamp &previous,
+                                           const BGPMessage &message) {
+            std::ostringstream error;
+            error << "Parsed-cache chronological order violation: " << current.first << '.'
+                  << std::setfill('0') << std::setw(6) << current.second;
+            if (has_message_field(message_fields_, BGPMessageFields::SourceFile)) {
+                error << " from " << message.source_file;
+            }
+            error << " follows " << previous.first << '.' << std::setfill('0') << std::setw(6)
+                  << previous.second << "; regenerate parsed caches";
+            throw std::runtime_error(error.str());
+        };
 
         const MessageTimestamp first_timestamp = timestamp_of(messages.front());
         if (last_delivered_message_timestamp_.has_value() && first_timestamp < *last_delivered_message_timestamp_) {
-            std::ostringstream error;
-            error << "Strict chronological message order cannot be guaranteed: " << first_timestamp.first << '.'
-                  << std::setfill('0') << std::setw(6) << first_timestamp.second;
-            if (has_message_field(message_fields_, BGPMessageFields::SourceFile)) {
-                error << " from " << messages.front().source_file;
-            }
-            error << " follows " << last_delivered_message_timestamp_->first << '.'
-                  << std::setfill('0') << std::setw(6) << last_delivered_message_timestamp_->second;
-            throw std::runtime_error(error.str());
+            throw_order_error(first_timestamp, *last_delivered_message_timestamp_, messages.front());
         }
-        delivered_timestamp = timestamp_of(messages.back());
+        MessageTimestamp previous_timestamp = first_timestamp;
+        for (std::size_t index = 1; index < messages.size(); ++index) {
+            const MessageTimestamp current_timestamp = timestamp_of(messages[index]);
+            if (current_timestamp < previous_timestamp) {
+                throw_order_error(current_timestamp, previous_timestamp, messages[index]);
+            }
+            previous_timestamp = current_timestamp;
+        }
+        delivered_timestamp = previous_timestamp;
     }
 
     if (processor_mutex == nullptr) {

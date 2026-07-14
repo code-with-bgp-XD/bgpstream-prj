@@ -88,7 +88,9 @@ void run_download_and_preparse(const bgpstream_runner::Config &config) {
     std::cout << "parsed cache complete: " << parsed.source_files << " source files, "
               << parsed.reused_files << " reused, " << parsed.generated_files << " generated, "
               << parsed.generated_messages << " generated messages, "
-              << bgpstream_runner::format_bytes(parsed.cache_bytes) << " parsed cache data" << std::endl;
+              << bgpstream_runner::format_bytes(parsed.cache_bytes) << " parsed cache data, schema v"
+              << bgpstream_runner::kParsedCacheSchemaVersion
+              << ", timestamp-ascending-stable" << std::endl;
 }
 
 }  // namespace

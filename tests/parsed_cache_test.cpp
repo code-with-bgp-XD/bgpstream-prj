@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 #include "bgpstream_runner/parsed_cache.h"
@@ -153,10 +154,29 @@ int main(int argc, char **argv) {
             require(regenerated.generated_files == 1 && regenerated.reused_files == 0,
                     "truncated real MRT cache was not regenerated");
 
+            std::optional<std::pair<std::time_t, std::uint32_t>> previous_timestamp;
+            std::optional<std::pair<std::uint64_t, std::uint64_t>> previous_identity;
             const MessageTraversalStats read = read_parsed_cache(
                 source_file, kAllBGPMessageFields,
                 static_cast<std::size_t>(config.message_batch_size), std::nullopt,
-                [](std::vector<BGPMessage> &) {});
+                [&](std::vector<BGPMessage> &batch) {
+                    for (const BGPMessage &message : batch) {
+                        const auto timestamp =
+                            std::make_pair(message.timestamp, message.timestamp_microseconds);
+                        const auto identity =
+                            std::make_pair(message.record_index, message.element_index);
+                        require(!previous_timestamp.has_value() ||
+                                    !(*previous_timestamp > timestamp),
+                                "real MRT cache is not ordered by timestamp");
+                        if (previous_timestamp == timestamp) {
+                            require(previous_identity.has_value() &&
+                                        *previous_identity <= identity,
+                                    "equal-timestamp messages were not stably ordered");
+                        }
+                        previous_timestamp = timestamp;
+                        previous_identity = identity;
+                    }
+                });
             require(regenerated.generated_messages == read.visited_messages,
                     "real MRT cache counts did not round-trip");
             std::cout << "messages=" << read.visited_messages << '\n';
@@ -184,6 +204,25 @@ int main(int argc, char **argv) {
             make_message(BGPMessageType::Announcement, 100, "203.0.113.0/24"),
             make_message(BGPMessageType::Withdrawal, 200, "2001:db8:1::/48"),
         };
+
+        const std::filesystem::path unsorted_source = test_root / "updates.unsorted.bz2";
+        {
+            std::ofstream source(unsorted_source, std::ios::binary);
+            source << "unsorted source fingerprint";
+        }
+        bool unsorted_rejected = false;
+        try {
+            BGPMessage later = expected.front();
+            BGPMessage earlier = expected.front();
+            later.timestamp_microseconds = 2;
+            earlier.timestamp_microseconds = 1;
+            ParsedCacheWriter unsorted_writer(unsorted_source);
+            unsorted_writer.append({later, earlier});
+        } catch (const ParsedCacheFailure &) {
+            unsorted_rejected = true;
+        }
+        require(unsorted_rejected, "writer accepted messages that were not ordered by timestamp");
+
         ParsedCacheWriter writer(source_file);
         writer.append(expected);
         writer.finalize();

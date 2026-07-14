@@ -226,12 +226,13 @@ run_cache_clear() {
   local file_count
   local total_bytes
   file_count="$(find "$cache_root" -type f -path '*/parsed-cache/*' \
-    \( -name '*.bgpcache' -o -name '*.bgpcache.part' \) | wc -l | tr -d ' ')"
+    \( -name '*.bgpcache' -o -name '*.bgpcache.part' -o -name '*.bgpcache.sort.part' \) |
+    wc -l | tr -d ' ')"
   total_bytes="$(find "$cache_root" -type f -path '*/parsed-cache/*' \
-    \( -name '*.bgpcache' -o -name '*.bgpcache.part' \) -printf '%s\n' |
+    \( -name '*.bgpcache' -o -name '*.bgpcache.part' -o -name '*.bgpcache.sort.part' \) -printf '%s\n' |
     awk 'BEGIN { sum = 0 } { sum += $1 } END { printf "%.0f\n", sum }')"
   find "$cache_root" -type f -path '*/parsed-cache/*' \
-    \( -name '*.bgpcache' -o -name '*.bgpcache.part' \) -delete
+    \( -name '*.bgpcache' -o -name '*.bgpcache.part' -o -name '*.bgpcache.sort.part' \) -delete
   find "$cache_root" -type d -name parsed-cache -empty -delete
   echo "cache_root: $cache_root"
   echo "source_mrt_files_preserved: true"

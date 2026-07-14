@@ -8,7 +8,7 @@
    使用 `libcurl` 负责远端资源发现、HTTPS 下载、断点续传、并发、重试和文件落盘。Route Views collector 直接使用官方归档地址，其他 collector 通过 CAIDA Broker API 发现资源。
 
 2. C++ MRT 预解析与二进制缓存层
-   下载模式使用 `libBGPStream` 将每个原始 MRT 文件完整解析一次，写入带 schema 版本、源文件指纹、分块校验和的 `.bgpcache` 文件。系统存在 `libzstd.so.1` 时自动使用 Zstd 压缩，否则写入未压缩分块。
+   下载模式使用 `libBGPStream` 将每个原始 MRT 文件完整解析一次，按 `(timestamp, timestamp_microseconds)` 和原始读取序号稳定排序，再写入带 schema 版本、源文件指纹、分块校验和的 `.bgpcache` 文件。系统存在 `libzstd.so.1` 时自动使用 Zstd 压缩，否则写入未压缩分块。
 
 3. C++ 分析中层 + 处理器插件
    分析中层按配置切片，只读取已经生成的 `.bgpcache`，按插件声明的字段投影为 `BGPMessage` 批次并交给上层处理器。分析模式不会下载文件，也不会现场解析 MRT。
@@ -25,7 +25,7 @@
    - 发现所需 update 资源；
    - 只下载缺失的原始 MRT，完整原始文件永不由自动缓存淘汰逻辑删除；
    - 检查每个 MRT 对应的解析缓存；缓存缺失、结构损坏、schema 过期或源文件指纹变化时重新生成；
-   - 预解析先写入 `.part`，完整结束后原子发布为 `.bgpcache`。
+   - 预解析使用磁盘排序临时文件，生成按时间升序稳定排列的 schema v2 缓存；完整结束后原子发布为 `.bgpcache`。
 3. `./manage.sh run` 使用 `analysis` 区块：
    - 按 `chunk_size + chunk_unit` 切分日期范围；
    - 在处理第一条消息前检查整个计划中的原始 MRT 和解析缓存；
@@ -143,7 +143,7 @@ bgpdata/routeviews/route-views.sg/updates/
 - `BGPMessageFields` 是按位组合的字段集合。插件必须实现 `required_message_fields()`；未声明字段保持默认值，
   中层不会为它执行字符串转换、容器填充或来源字符串复制，插件也不应读取它。
 - `Timestamp` 同时物化 `timestamp` 和 `timestamp_microseconds`；`OriginatedTimestamp`、`PeerStates` 和
-  `Annotations` 也分别对应同一逻辑数据组。严格时序插件会由框架自动加入 `Timestamp` 作为排序依赖。
+  `Annotations` 也分别对应同一逻辑数据组。严格时序插件会由框架自动加入 `Timestamp` 作为顺序校验依赖。
 - `ASPathString`、`ASPathSegments`、`FlattenedAsns` 和 `OriginAsn` 是四个独立需求。只声明 `OriginAsn` 时，
   中层只读取 origin ASN，不会顺带生成 AS path 字符串、结构化 segment 或扁平 ASN。
 - `asns` 仍是方便统计的扁平视图；需要区分 AS_SET、联盟序列和联盟集合时，应使用 `as_path_segments`。
@@ -181,7 +181,9 @@ bgpdata/routeviews/route-views.sg/updates/
   `cpp/src/parsed_cache.cpp`
   负责：
   - 为每个原始 MRT 生成独立 `.bgpcache`；
-  - 记录 schema 版本、原文件大小和修改时间；
+  - 记录 schema 版本、稳定时间排序标记、原文件大小和修改时间；
+  - 将完整消息暂存到 `.bgpcache.sort.part`，只在内存中保留轻量时间/偏移索引，排序后顺序写入最终缓存；
+  - 相同秒和微秒的消息按 MRT 原始读取顺序稳定排列；
   - 分块写入、校验和验证以及可选 Zstd 压缩；
   - 使用 `.part` + 原子改名避免把中断文件当成有效缓存；
   - 分析期执行字段投影和时间范围过滤；
@@ -451,9 +453,9 @@ cp config.example.json config.json
 - `cache-size`
   读取根目录 `config.json` 里的 `cache.output_dir`，统计当前缓存文件数量和总大小。
 - `cache-clear`
-  只删除 `parsed-cache/` 下由程序生成的 `.bgpcache`/`.part`，保留所有原始 MRT。
+  只删除 `parsed-cache/` 下由程序生成的 `.bgpcache`、写入临时文件和排序临时文件，保留所有原始 MRT。
 
-`download` 和 `download-release` 不加载处理器插件，也不执行业务分析。它们先复用或下载原始 MRT，再并行生成解析缓存。网络中断或进程停止后会保留下载 `.part`；预解析中断也只留下 `.bgpcache.part`。完整原始 MRT 不会被删除。结束日期为包含式。
+`download` 和 `download-release` 不加载处理器插件，也不执行业务分析。它们先复用或下载原始 MRT，再并行生成解析缓存。网络中断或进程停止后会保留下载 `.part`；强制终止预解析可能留下 `.bgpcache.part` 或 `.bgpcache.sort.part`，可由 `cache-clear` 安全清理。完整原始 MRT 不会被删除。结束日期为包含式。
 
 分析读取每个分块时还会验证解压结果和校验和。如果出现罕见的缓存内容损坏，可执行 `cache-clear` 后重新运行 `download`；该操作只重建派生缓存，不会删除原始 MRT。
 
@@ -608,7 +610,7 @@ cp config.example.json config.json
   预解析阶段同时处理的原始 MRT 文件数。每个线程使用独立 libBGPStream 实例，并写入独立缓存文件。
 
 - `cache.message_batch_size`
-  单个解析缓存压缩块最多包含的消息数。较大值通常提高压缩率，但会增加预解析和读取时的峰值内存。
+  单个解析缓存压缩块最多包含的消息数。较大值通常提高压缩率，但会增加预解析和读取时的峰值内存。排序阶段还会为每个正在处理的 MRT 建立磁盘临时文件和轻量内存索引；提高 `parser_workers` 前应同时评估内存与临时磁盘空间。
 
 - `analysis.parser_workers`
   C++ 中层同时读取的解析缓存文件数。当插件的 `supports_concurrent_message_handling()` 返回 `true` 时，这些线程也可以同时进入同一个插件实例的 `handle_messages()`；否则框架仍会把插件调用串行化。当 `requires_strict_chronological_order()` 返回 `true` 时，为保证全局时序，框架会忽略这里更大的并发值并只使用一个读取线程。增加这个线程数也会增加内存占用。
@@ -732,7 +734,7 @@ bool supports_concurrent_message_handling() const noexcept override { return tru
 bool requires_strict_chronological_order() const noexcept override { return true; }
 ```
 
-此时框架按照资源的归档起始时间逐文件处理，在每个批次内按 `(BGPMessage.timestamp, BGPMessage.timestamp_microseconds)` 稳定排序，并在整个运行期间校验跨批次、跨文件和跨分片的时间戳不发生倒退。相同时间戳的多条报文可以连续出现。如果源文件出现无法跨批次修正的时间倒退，程序会在把乱序批次交给插件之前终止并报告错误。严格时序模式始终只使用一个解析线程；即使 `supports_concurrent_message_handling()` 同时返回 `true`，也不会并发进入 `handle_messages()`。
+预解析生成的 schema v2 缓存已经按 `(BGPMessage.timestamp, BGPMessage.timestamp_microseconds)` 稳定排序。分析阶段不再执行排序，而是按照资源归档起始时间逐文件读取，并校验缓存内部以及跨批次、跨文件、跨分片的时间戳不发生倒退；相同时间戳的多条报文保持 MRT 中的原始读取顺序。发现顺序违规时，程序会在把乱序消息交给插件之前终止并要求重新生成缓存。严格时序模式始终只使用一个读取线程；即使 `supports_concurrent_message_handling()` 同时返回 `true`，也不会并发进入 `handle_messages()`。
 
 `BGPMessage` 和 `MessageProcessor` 都是插件 ABI 的一部分。字段声明接口把插件 API 提升到了版本 4，旧插件
 必须实现 `required_message_fields()` 并用当前头文件重新编译；加载器会拒绝版本不一致的动态库。
