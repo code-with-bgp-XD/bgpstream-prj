@@ -110,6 +110,10 @@ if(BUILD_TESTING)
   target_include_directories(routeviews_archive_test PRIVATE cpp/src)
   target_link_libraries(routeviews_archive_test PRIVATE bgpstream_runner_core)
   add_test(NAME routeviews_archive_discovery COMMAND routeviews_archive_test)
+
+  add_executable(config_file_test tests/config_file_test.cpp)
+  target_link_libraries(config_file_test PRIVATE bgpstream_runner_core)
+  add_test(NAME config_file_parsing COMMAND config_file_test)
 endif()
 
 add_subdirectory(examples)

@@ -140,6 +140,19 @@ int main(int argc, char **argv) {
             config.collector = "route-views.sg";
             config.parser_workers = 2;
             config.message_batch_size = 512;
+            config.parse_on_cache_miss = true;
+
+            const AnalysisInputTraversal realtime = traverse_analysis_input(
+                config, source_file, BGPMessageFields::Type,
+                static_cast<std::size_t>(config.message_batch_size), std::nullopt,
+                [](std::vector<BGPMessage> &) {});
+            require(realtime.used_realtime_parser,
+                    "missing parsed cache did not use the realtime MRT parser");
+            require(realtime.stats.visited_messages > 0,
+                    "realtime MRT parser did not visit any messages");
+            require(!std::filesystem::exists(parsed_cache_path(source_file)),
+                    "realtime MRT parser unexpectedly generated a parsed cache");
+
             const ParsedCacheBuildSummary generated = ensure_parsed_caches(config, {source_file}, false);
             require(generated.generated_files == 1 && generated.reused_files == 0,
                     "real MRT was not parsed into a new cache");
@@ -156,8 +169,8 @@ int main(int argc, char **argv) {
 
             std::optional<std::pair<std::time_t, std::uint32_t>> previous_timestamp;
             std::optional<std::pair<std::uint64_t, std::uint64_t>> previous_identity;
-            const MessageTraversalStats read = read_parsed_cache(
-                source_file, kAllBGPMessageFields,
+            const AnalysisInputTraversal cached = traverse_analysis_input(
+                config, source_file, kAllBGPMessageFields,
                 static_cast<std::size_t>(config.message_batch_size), std::nullopt,
                 [&](std::vector<BGPMessage> &batch) {
                     for (const BGPMessage &message : batch) {
@@ -177,9 +190,11 @@ int main(int argc, char **argv) {
                         previous_identity = identity;
                     }
                 });
-            require(regenerated.generated_messages == read.visited_messages,
+            require(!cached.used_realtime_parser,
+                    "valid parsed cache unexpectedly used the realtime MRT parser");
+            require(regenerated.generated_messages == cached.stats.visited_messages,
                     "real MRT cache counts did not round-trip");
-            std::cout << "messages=" << read.visited_messages << '\n';
+            std::cout << "messages=" << cached.stats.visited_messages << '\n';
             std::filesystem::remove_all(real_test_root);
             return 0;
         } catch (const std::exception &error) {
@@ -199,6 +214,33 @@ int main(int argc, char **argv) {
             std::ofstream source(source_file, std::ios::binary);
             source << "source fingerprint";
         }
+
+        Config strict_cache_config;
+        bool missing_cache_rejected = false;
+        try {
+            (void)traverse_analysis_input(
+                strict_cache_config, source_file, BGPMessageFields::Type, 1, std::nullopt,
+                [](std::vector<BGPMessage> &) {});
+        } catch (const ParsedCacheFailure &error) {
+            missing_cache_rejected = std::string(error.what()).find("Required parsed cache is missing") !=
+                                     std::string::npos;
+        }
+        require(missing_cache_rejected,
+                "analysis input accepted a missing parsed cache when realtime parsing was disabled");
+
+        Config realtime_config;
+        realtime_config.parse_on_cache_miss = true;
+        bool missing_source_rejected = false;
+        try {
+            (void)traverse_analysis_input(
+                realtime_config, test_root / "not-downloaded.bz2", BGPMessageFields::Type, 1,
+                std::nullopt, [](std::vector<BGPMessage> &) {});
+        } catch (const MrtParseFailure &error) {
+            missing_source_rejected = std::string(error.what()).find("Required source MRT is missing") !=
+                                      std::string::npos;
+        }
+        require(missing_source_rejected,
+                "analysis input did not reject an undownloaded source MRT");
 
         const std::vector<BGPMessage> expected{
             make_message(BGPMessageType::Announcement, 100, "203.0.113.0/24"),

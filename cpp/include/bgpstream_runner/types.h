@@ -49,6 +49,7 @@ struct Config {
     int download_workers = kDefaultDownloadWorkers;
     int parser_workers = kDefaultParserWorkers;
     int message_batch_size = kDefaultMessageBatchSize;
+    bool parse_on_cache_miss = false;
     int chunk_size = kDefaultChunkSize;
     ChunkUnit chunk_unit = ChunkUnit::Month;
     double max_cache_size_gb = kDefaultMaxCacheSizeGiB;  // Legacy compatibility; no eviction is performed.
@@ -74,6 +75,7 @@ struct RangeProcessingStats {
     std::uint64_t withdrawal_messages = 0;
     std::uint64_t peer_state_messages = 0;
     std::uint64_t end_of_rib_messages = 0;
+    std::uint64_t realtime_parsed_files = 0;
     std::uint64_t skipped_parse_files = 0;
 };
 

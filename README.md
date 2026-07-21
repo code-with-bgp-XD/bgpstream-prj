@@ -11,7 +11,7 @@
    下载模式使用 `libBGPStream` 将每个原始 MRT 文件完整解析一次，按 `(timestamp, timestamp_microseconds)` 和原始读取序号稳定排序，再写入带 schema 版本、源文件指纹、分块校验和的 `.bgpcache` 文件。系统存在 `libzstd.so.1` 时自动使用 Zstd 压缩，否则写入未压缩分块。
 
 3. C++ 分析中层 + 处理器插件
-   分析中层按配置切片，只读取已经生成的 `.bgpcache`，按插件声明的字段投影为 `BGPMessage` 批次并交给上层处理器。分析模式不会下载文件，也不会现场解析 MRT。
+   分析中层按配置切片，优先读取已经生成的 `.bgpcache`，按插件声明的字段投影为 `BGPMessage` 批次并交给上层处理器。默认情况下缓存缺失会终止；开启 `analysis.parse_on_cache_miss` 后，可直接流式解析已经下载的原始 MRT。分析模式始终不会下载文件。
    具体“怎么处理一批报文”由 `MessageProcessor` 插件决定，主程序在运行时动态加载处理器库。
 
 ---
@@ -28,9 +28,10 @@
    - 预解析使用磁盘排序临时文件，生成按时间升序稳定排列的 schema v2 缓存；完整结束后原子发布为 `.bgpcache`。
 3. `./manage.sh run` 使用 `analysis` 区块：
    - 按 `chunk_size + chunk_unit` 切分日期范围；
-   - 通过 `analysis-plan` 进度条显示资源发现与分片路径规划，不在启动时批量校验原始 MRT 和解析缓存；
-   - 按分片直接读取解析缓存；读取到缺失或损坏的文件时就地报错，绝不自动下载或现场补解析；
-   - 从解析缓存读取消息，按 `required_message_fields()` 只物化插件需要的字段，再批量交给处理器。
+   - 通过 `analysis-plan` 进度条显示资源发现与分片路径规划，并在处理消息前确认计划中的原始 MRT 均已下载；
+   - 按分片优先读取解析缓存；缓存缺失时根据 `analysis.parse_on_cache_miss` 选择终止，或直接流式解析原始 MRT；
+   - 原始 MRT 缺失时无条件终止，分析模式绝不自动下载；已有但损坏或过期的解析缓存也会终止；
+   - 从解析缓存或实时 MRT 解析器读取消息，按 `required_message_fields()` 只物化插件需要的字段，再批量交给处理器。
 4. 所有分片完成后输出最终累计统计。每次分析运行使用一个 `log/rcd-*` 文件记录分片、成功或异常结果。
 
 缓存目录示例：
@@ -100,6 +101,7 @@ bgpdata/routeviews/route-views.sg/updates/
   - 处理器插件路径
   - 下载线程数
   - 解析线程数
+  - 解析缓存缺失时是否实时解析原始 MRT
   - 批量处理大小
   - 日志开关
   - 下载条目限制
@@ -199,8 +201,9 @@ bgpdata/routeviews/route-views.sg/updates/
   `cpp/src/chunk_engine.cpp`
   这是当前系统的核心中层。职责包括：
   - 按配置的分片大小和单位切片运行
-  - 在分析开始前验证所有原始文件和解析缓存
-  - 只读取解析缓存，不调用下载器下载文件，也不解析原始 MRT
+  - 在处理消息前确认计划中的原始文件均已下载
+  - 优先读取解析缓存，并按配置决定缓存缺失时是否实时解析原始 MRT
+  - 不调用下载器下载文件
   - 逐文件恢复 RIB / announcement / withdrawal / peer-state / End-of-RIB 元素
   - 把报文打包成批次后交给处理器
   - 输出分片级和全局累计统计
@@ -421,11 +424,12 @@ cp config.example.json config.json
 - collector
 - 已处理分片数
 - 已使用文件数
+- 实时解析的原始 MRT 文件数
 - announcement / withdrawal / visited_messages 统计
 - 当前处理器的业务统计结果
   具体字段取决于你当前加载的本地插件实现。
 
-缓存目录固定为 `cache.output_dir`。分析阶段对该目录完全只读且不执行启动前批量校验：程序按分片直接读取 `.bgpcache`，遇到缺少原始 MRT、缓存缺失或内容损坏时才在当前位置失败，不会下载、预解析或淘汰其他文件。下载阶段负责补齐缺失的原始文件并检查、生成或更新派生解析缓存。
+缓存目录固定为 `cache.output_dir`。分析阶段不会下载或淘汰文件，并会在处理消息前检查原始 MRT 是否全部存在；任一原始文件缺失都会直接失败。程序按分片优先读取 `.bgpcache`：缓存缺失且 `analysis.parse_on_cache_miss=false` 时失败，设为 `true` 时直接解析已有 MRT。实时解析不会生成 `.bgpcache`；已有缓存内容损坏或源文件指纹不匹配仍会失败。下载阶段负责补齐原始文件并检查、生成或更新派生解析缓存。
 
 根目录下的 `manage.sh` 可以统一执行构建和缓存管理：
 
@@ -515,6 +519,7 @@ cp config.example.json config.json
     "processor_plugin": "example_message_summary_plugin",
     "parser_workers": 8,
     "message_batch_size": 1048576,
+    "parse_on_cache_miss": false,
     "chunk_size": 1,
     "chunk_unit": "day",
     "max_cache_size_gb": 5.0,
@@ -550,6 +555,7 @@ cp config.example.json config.json
 配置相关命令行参数：
 
 - `--processor-plugin NAME_OR_PATH`
+- `--parse-on-cache-miss true|false`
 
 分片相关命令行参数：
 
@@ -566,6 +572,7 @@ cp config.example.json config.json
 - `processor_plugin`
 - `parser_workers`
 - `message_batch_size`
+- `parse_on_cache_miss`
 - `chunk_size`
 - `chunk_unit`
 - `max_cache_size_gb`
@@ -619,10 +626,13 @@ cp config.example.json config.json
   单个解析缓存压缩块最多包含的消息数。较大值通常提高压缩率，但会增加预解析和读取时的峰值内存。排序阶段还会为每个正在处理的 MRT 建立磁盘临时文件和轻量内存索引；提高 `parser_workers` 前应同时评估内存与临时磁盘空间。
 
 - `analysis.parser_workers`
-  C++ 中层同时读取的解析缓存文件数。当插件的 `supports_concurrent_message_handling()` 返回 `true` 时，这些线程也可以同时进入同一个插件实例的 `handle_messages()`；否则框架仍会把插件调用串行化。当 `requires_strict_chronological_order()` 返回 `true` 时，为保证全局时序，框架会忽略这里更大的并发值并只使用一个读取线程。增加这个线程数也会增加内存占用。
+  C++ 中层同时处理的输入文件数；通常读取解析缓存，启用实时回退后也可能直接解析原始 MRT。当插件的 `supports_concurrent_message_handling()` 返回 `true` 时，这些线程也可以同时进入同一个插件实例的 `handle_messages()`；否则框架仍会把插件调用串行化。当 `requires_strict_chronological_order()` 返回 `true` 时，为保证全局时序，框架会忽略这里更大的并发值并只使用一个线程。增加这个线程数也会增加内存占用。
 
 - `analysis.message_batch_size`
   中层交给处理器的单批报文数量。中层会先把报文聚成一个 `std::vector<BGPMessage>`，再调用一次处理器的 `handle_messages()`。
+
+- `analysis.parse_on_cache_miss`
+  布尔值，默认 `false`。为 `false` 时，所需 `.bgpcache` 缺失会立即终止分析；为 `true` 时，程序直接用 libBGPStream 流式解析已经下载的原始 MRT，并在本次分析中把消息交给插件，但不会生成解析缓存。此开关不允许自动下载，也不把损坏、过期或读取中失败的已有缓存静默切换为实时解析。实时路径使用 MRT 原始顺序，不执行预解析缓存提供的稳定时间排序；要求严格时序的插件若发现逆序会终止运行。
 
 - `analysis.chunk_size`
   分片大小数值。它和 `chunk_unit` 一起决定切片粒度。
@@ -641,7 +651,7 @@ cp config.example.json config.json
   文件数量限制。`analysis.limit` 限制一次分析最多处理的匹配文件数，`cache.limit` 限制一次下载与预解析最多处理的匹配文件数。`-1` 表示不限制，正整数通常用于测试。
 
 - `analysis.log_phase_transitions`
-  是否输出 `plan phase`、`process parsed-cache phase` 等阶段切换日志。
+  是否输出 `plan phase`、`process parsed-cache phase` 或 `process analysis-input phase` 等阶段切换日志。
 
 - `analysis.log_chunk_summary`
   是否在每个分片处理完成后输出一次当前累计统计。
@@ -659,6 +669,9 @@ cp config.example.json config.json
 
 - `processed_chunks`
 - `files_used`
+- `input_mode`
+- `parse_on_cache_miss`
+- `realtime_parsed_files`
 - `processor_concurrent_message_handling`
 - `processor_strict_chronological_order`
 - `visited_messages`

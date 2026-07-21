@@ -131,11 +131,18 @@ RangeProcessingStats ChunkEngine::run() {
         // traversal applies a different time filter, so count every planned target.
         total_files += planned_chunk.targets.size();
         for (const DownloadTarget &target : planned_chunk.targets) {
-            // Download mode owns the separate cache-validation pass. Analysis
-            // lets the reader consume each cache once without a preflight scan.
-            std::filesystem::path source_file = std::filesystem::exists(target.local_path)
-                                                    ? target.local_path
-                                                    : target.destination_path;
+            // Raw MRT availability is checked for the complete plan before any
+            // message is delivered. Analysis mode never downloads missing data.
+            std::filesystem::path source_file;
+            if (std::filesystem::exists(target.local_path)) {
+                source_file = target.local_path;
+            } else if (std::filesystem::exists(target.destination_path)) {
+                source_file = target.destination_path;
+            } else {
+                throw std::runtime_error("Required source MRT is missing: " +
+                                         target.destination_path.string() +
+                                         ". Analysis mode never downloads data; run the download command first.");
+            }
             total_bytes += safe_file_size(parsed_cache_path(source_file));
             planned_chunk.source_files.push_back(std::move(source_file));
         }
@@ -157,7 +164,8 @@ RangeProcessingStats ChunkEngine::run() {
 
     std::unique_ptr<FileProgressDisplay> progress;
     if (total_files > 0) {
-        progress = std::make_unique<FileProgressDisplay>(total_files, total_bytes, "parsed-cache");
+        progress = std::make_unique<FileProgressDisplay>(
+            total_files, total_bytes, config_.parse_on_cache_miss ? "analysis-input" : "parsed-cache");
     }
 
     for (const PlannedChunk &planned_chunk : planned_chunks) {
@@ -177,7 +185,8 @@ RangeProcessingStats ChunkEngine::run() {
         }
 
         if (config_.log_phase_transitions) {
-            std::cout << "process parsed-cache phase " << chunk_label << std::endl;
+            std::cout << "process " << (config_.parse_on_cache_miss ? "analysis-input" : "parsed-cache")
+                      << " phase " << chunk_label << std::endl;
         }
         process_files(source_files, chunk, *progress);
 
@@ -209,7 +218,10 @@ void ChunkEngine::print_summary(std::ostream &out, const RangeProcessingStats &s
     out << "end_date: " << config_.end_date << '\n';
     out << "collector: " << config_.collector << '\n';
     out << "data_dir: " << std::filesystem::absolute(data_dir).string() << '\n';
-    out << "input_mode: parsed-cache-only\n";
+    out << "input_mode: "
+        << (config_.parse_on_cache_miss ? "parsed-cache-with-realtime-mrt-fallback" : "parsed-cache-only")
+        << '\n';
+    out << "parse_on_cache_miss: " << (config_.parse_on_cache_miss ? "true" : "false") << '\n';
     out << "parsed_cache_schema_version: " << kParsedCacheSchemaVersion << '\n';
     out << "parsed_cache_order: timestamp-ascending-stable\n";
     out << "analysis_time_sorting: false\n";
@@ -231,6 +243,7 @@ void ChunkEngine::print_summary(std::ostream &out, const RangeProcessingStats &s
     out << "withdrawal_messages: " << stats.withdrawal_messages << '\n';
     out << "peer_state_messages: " << stats.peer_state_messages << '\n';
     out << "end_of_rib_messages: " << stats.end_of_rib_messages << '\n';
+    out << "realtime_parsed_files: " << stats.realtime_parsed_files << '\n';
     out << "skipped_parse_files: " << stats.skipped_parse_files << '\n';
     out << "============================= plugin output =============================" << '\n';
     processor_.print_summary(out);
@@ -297,9 +310,9 @@ void ChunkEngine::process_files(const std::vector<std::filesystem::path> &files,
                         break;
                     }
                     const auto &file_path = files[file_index];
-                    const MessageTraversalStats file_stats =
+                    const FileTraversalResult file_result =
                         traverse_single_file(file_path, chunk, processor_mutex_ptr);
-                    record_processed_file(file_stats);
+                    record_processed_file(file_result);
                     progress.mark_batch_completed(1, safe_file_size(parsed_cache_path(file_path)));
                 }
             } catch (...) {
@@ -319,13 +332,13 @@ void ChunkEngine::process_files(const std::vector<std::filesystem::path> &files,
     }
 }
 
-MessageTraversalStats ChunkEngine::traverse_single_file(const std::filesystem::path &file_path,
-                                                        const ClosedDateRange &chunk,
-                                                        std::mutex *processor_mutex) {
-    return read_parsed_cache(file_path, message_fields_, static_cast<std::size_t>(config_.message_batch_size),
-                             chunk, [&](std::vector<BGPMessage> &messages) {
-                                 dispatch_message_batch(messages, processor_mutex);
-                             });
+ChunkEngine::FileTraversalResult ChunkEngine::traverse_single_file(const std::filesystem::path &file_path,
+                                                                   const ClosedDateRange &chunk,
+                                                                   std::mutex *processor_mutex) {
+    const AnalysisInputTraversal traversal = traverse_analysis_input(
+        config_, file_path, message_fields_, static_cast<std::size_t>(config_.message_batch_size), chunk,
+        [&](std::vector<BGPMessage> &messages) { dispatch_message_batch(messages, processor_mutex); });
+    return FileTraversalResult{traversal.stats, traversal.used_realtime_parser};
 }
 
 void ChunkEngine::dispatch_message_batch(std::vector<BGPMessage> &messages, std::mutex *processor_mutex) {
@@ -390,8 +403,9 @@ void ChunkEngine::increment_chunk_count() {
     stats_.chunk_count += 1;
 }
 
-void ChunkEngine::record_processed_file(const MessageTraversalStats &file_stats) {
+void ChunkEngine::record_processed_file(const FileTraversalResult &file_result) {
     std::lock_guard<std::mutex> lock(stats_mutex_);
+    const MessageTraversalStats &file_stats = file_result.stats;
     stats_.files_used += 1;
     stats_.visited_messages += file_stats.visited_messages;
     stats_.rib_messages += file_stats.rib_messages;
@@ -399,6 +413,9 @@ void ChunkEngine::record_processed_file(const MessageTraversalStats &file_stats)
     stats_.withdrawal_messages += file_stats.withdrawal_messages;
     stats_.peer_state_messages += file_stats.peer_state_messages;
     stats_.end_of_rib_messages += file_stats.end_of_rib_messages;
+    if (file_result.used_realtime_parser) {
+        stats_.realtime_parsed_files += 1;
+    }
 }
 
 }  // namespace bgpstream_runner

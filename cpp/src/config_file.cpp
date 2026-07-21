@@ -353,6 +353,8 @@ class JsonConfigParser {
             config_->parser_workers = require_int(key, value);
         } else if (key == "message_batch_size") {
             config_->message_batch_size = require_int(key, value);
+        } else if (key == "parse_on_cache_miss") {
+            config_->parse_on_cache_miss = require_bool(key, value);
         } else if (key == "chunk_size") {
             config_->chunk_size = require_int(key, value);
         } else if (key == "chunk_unit") {

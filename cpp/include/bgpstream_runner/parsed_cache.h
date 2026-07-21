@@ -40,6 +40,11 @@ struct ParsedCacheBuildSummary {
     std::uint64_t cache_bytes = 0;
 };
 
+struct AnalysisInputTraversal {
+    MessageTraversalStats stats;
+    bool used_realtime_parser = false;
+};
+
 std::filesystem::path parsed_cache_path(const std::filesystem::path &source_file);
 ParsedCacheInspection inspect_parsed_cache(const std::filesystem::path &source_file);
 
@@ -72,6 +77,16 @@ MessageTraversalStats read_parsed_cache(const std::filesystem::path &source_file
                                         std::size_t message_batch_size,
                                         const std::optional<ClosedDateRange> &range,
                                         const MessageBatchHandler &handle_batch);
+
+// Reads the parsed cache when present. If it is missing and
+// Config::parse_on_cache_miss is enabled, parses the already-downloaded MRT
+// directly without creating a cache. A missing source MRT is always fatal.
+AnalysisInputTraversal traverse_analysis_input(const Config &config,
+                                                const std::filesystem::path &source_file,
+                                                BGPMessageFields fields,
+                                                std::size_t message_batch_size,
+                                                const std::optional<ClosedDateRange> &range,
+                                                const MessageBatchHandler &handle_batch);
 
 ParsedCacheBuildSummary ensure_parsed_caches(const Config &config,
                                              const std::vector<std::filesystem::path> &source_files,

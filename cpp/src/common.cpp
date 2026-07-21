@@ -417,6 +417,7 @@ void FileProgressDisplay::close_locked() {
            << "  --download-workers N\n"
            << "  --parser-workers N\n"
            << "  --message-batch-size N\n"
+           << "  --parse-on-cache-miss true|false\n"
            << "  --chunk-size N\n"
            << "  --chunk-unit day|month\n"
            << "  --max-cache-size-gb NUMBER  Legacy compatibility option; ignored\n"
@@ -485,6 +486,15 @@ Config parse_args(int argc, char **argv) {
             config.parser_workers = std::stoi(require_value("--parser-workers"));
         } else if (arg == "--message-batch-size") {
             config.message_batch_size = std::stoi(require_value("--message-batch-size"));
+        } else if (arg == "--parse-on-cache-miss") {
+            const std::string value = require_value("--parse-on-cache-miss");
+            if (value == "true") {
+                config.parse_on_cache_miss = true;
+            } else if (value == "false") {
+                config.parse_on_cache_miss = false;
+            } else {
+                throw std::runtime_error("--parse-on-cache-miss must be true or false");
+            }
         } else if (arg == "--chunk-size") {
             config.chunk_size = std::stoi(require_value("--chunk-size"));
         } else if (arg == "--chunk-unit") {

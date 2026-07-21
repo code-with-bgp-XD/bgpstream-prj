@@ -1420,6 +1420,36 @@ MessageTraversalStats read_parsed_cache(const std::filesystem::path &source_file
     return delivered_stats;
 }
 
+AnalysisInputTraversal traverse_analysis_input(const Config &config,
+                                                const std::filesystem::path &source_file,
+                                                BGPMessageFields fields,
+                                                std::size_t message_batch_size,
+                                                const std::optional<ClosedDateRange> &range,
+                                                const MessageBatchHandler &handle_batch) {
+    if (!std::filesystem::exists(source_file)) {
+        throw MrtParseFailure("Required source MRT is missing: " + source_file.string() +
+                              ". Analysis mode never downloads data.");
+    }
+
+    const std::filesystem::path cache_path = parsed_cache_path(source_file);
+    if (std::filesystem::exists(cache_path)) {
+        return AnalysisInputTraversal{
+            read_parsed_cache(source_file, fields, message_batch_size, range, handle_batch),
+            false,
+        };
+    }
+    if (!config.parse_on_cache_miss) {
+        throw ParsedCacheFailure("Required parsed cache is missing: " + cache_path.string() +
+                                 ". Set analysis.parse_on_cache_miss to true to parse the downloaded MRT "
+                                 "during analysis.");
+    }
+
+    return AnalysisInputTraversal{
+        traverse_mrt_file(config, source_file, fields, message_batch_size, range, handle_batch),
+        true,
+    };
+}
+
 ParsedCacheBuildSummary ensure_parsed_caches(const Config &config,
                                              const std::vector<std::filesystem::path> &source_files,
                                              bool show_progress) {

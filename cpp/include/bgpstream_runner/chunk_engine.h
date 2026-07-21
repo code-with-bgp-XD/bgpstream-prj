@@ -32,14 +32,19 @@ class ChunkEngine {
    private:
     using MessageTimestamp = std::pair<std::time_t, std::uint32_t>;
 
+    struct FileTraversalResult {
+        MessageTraversalStats stats;
+        bool used_realtime_parser = false;
+    };
+
     void process_files(const std::vector<std::filesystem::path> &files, const ClosedDateRange &chunk,
                        FileProgressDisplay &progress);
-    MessageTraversalStats traverse_single_file(const std::filesystem::path &file_path,
-                                               const ClosedDateRange &chunk, std::mutex *processor_mutex);
+    FileTraversalResult traverse_single_file(const std::filesystem::path &file_path,
+                                             const ClosedDateRange &chunk, std::mutex *processor_mutex);
     void dispatch_message_batch(std::vector<BGPMessage> &messages, std::mutex *processor_mutex);
     void reset_stats();
     void increment_chunk_count();
-    void record_processed_file(const MessageTraversalStats &file_stats);
+    void record_processed_file(const FileTraversalResult &file_result);
 
     Config config_;
     DownloadClient download_client_;
