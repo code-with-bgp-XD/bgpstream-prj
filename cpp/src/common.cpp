@@ -420,7 +420,6 @@ void FileProgressDisplay::close_locked() {
            << "  --parse-on-cache-miss true|false\n"
            << "  --chunk-size N\n"
            << "  --chunk-unit day|month\n"
-           << "  --max-cache-size-gb NUMBER  Legacy compatibility option; ignored\n"
            << "  --log-phase-transitions true|false\n"
            << "  --log-chunk-summary true|false\n"
            << "  --log-final-summary true|false\n"
@@ -506,8 +505,6 @@ Config parse_args(int argc, char **argv) {
             } else {
                 throw std::runtime_error("--chunk-unit must be day or month");
             }
-        } else if (arg == "--max-cache-size-gb") {
-            config.max_cache_size_gb = std::stod(require_value("--max-cache-size-gb"));
         } else if (arg == "--log-phase-transitions") {
             const std::string value = require_value("--log-phase-transitions");
             if (value == "true") {

@@ -74,6 +74,20 @@ int main() {
         require(wrong_type_rejected,
                 "non-boolean analysis.parse_on_cache_miss was accepted");
 
+        write_config(config_path,
+                     R"({"analysis":{"max_cache_size_gb":5.0},"cache":{"output_dir":"data"}})");
+        bool removed_key_rejected = false;
+        try {
+            Config invalid;
+            apply_json_config_file(config_path, &invalid);
+        } catch (const std::runtime_error &error) {
+            removed_key_rejected =
+                std::string(error.what()).find("Unknown config key 'analysis.max_cache_size_gb'") !=
+                std::string::npos;
+        }
+        require(removed_key_rejected,
+                "removed analysis.max_cache_size_gb key was still accepted");
+
         std::filesystem::remove_all(test_root);
         return 0;
     } catch (const std::exception &error) {

@@ -306,13 +306,6 @@ class JsonConfigParser {
         return static_cast<int>(value.number_value);
     }
 
-    double require_number(const std::string &key, const JsonScalar &value) const {
-        if (value.kind != JsonScalarKind::Number) {
-            throw std::runtime_error("Config key '" + key + "' must be a number");
-        }
-        return value.number_value;
-    }
-
     bool require_bool(const std::string &key, const JsonScalar &value) const {
         if (value.kind != JsonScalarKind::Boolean) {
             throw std::runtime_error("Config key '" + key + "' must be a boolean");
@@ -359,8 +352,6 @@ class JsonConfigParser {
             config_->chunk_size = require_int(key, value);
         } else if (key == "chunk_unit") {
             config_->chunk_unit = require_chunk_unit(key, value);
-        } else if (key == "max_cache_size_gb") {
-            config_->max_cache_size_gb = require_number(key, value);
         } else if (key == "limit") {
             if (value.kind == JsonScalarKind::Null) {
                 config_->limit = -1;

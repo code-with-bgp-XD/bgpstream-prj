@@ -522,7 +522,6 @@ cp config.example.json config.json
     "parse_on_cache_miss": false,
     "chunk_size": 1,
     "chunk_unit": "day",
-    "max_cache_size_gb": 5.0,
     "limit": -1,
     "log_phase_transitions": true,
     "log_chunk_summary": true,
@@ -561,7 +560,6 @@ cp config.example.json config.json
 
 - `--chunk-size N`
 - `--chunk-unit day|month`
-- `--max-cache-size-gb N`
 
 `analysis` 区块保留已有的数据分析配置：
 
@@ -575,7 +573,6 @@ cp config.example.json config.json
 - `parse_on_cache_miss`
 - `chunk_size`
 - `chunk_unit`
-- `max_cache_size_gb`
 - `limit`
 - `log_phase_transitions`
 - `log_chunk_summary`
@@ -643,9 +640,6 @@ cp config.example.json config.json
   - `chunk_size = 1`, `chunk_unit = "day"` 表示按天处理
   - `chunk_size = 1`, `chunk_unit = "month"` 表示按月处理
   - `chunk_size = 7`, `chunk_unit = "day"` 表示按 7 天处理
-
-- `analysis.max_cache_size_gb`
-  为兼容已有 `config.json` 暂时保留，但当前版本忽略该值。程序不会基于容量自动删除原始 MRT 或解析缓存。
 
 - `analysis.limit` / `cache.limit`
   文件数量限制。`analysis.limit` 限制一次分析最多处理的匹配文件数，`cache.limit` 限制一次下载与预解析最多处理的匹配文件数。`-1` 表示不限制，正整数通常用于测试。
