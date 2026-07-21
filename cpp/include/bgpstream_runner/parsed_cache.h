@@ -79,8 +79,10 @@ MessageTraversalStats read_parsed_cache(const std::filesystem::path &source_file
                                         const MessageBatchHandler &handle_batch);
 
 // Reads the parsed cache when present. If it is missing and
-// Config::parse_on_cache_miss is enabled, parses the already-downloaded MRT
-// directly without creating a cache. A missing source MRT is always fatal.
+// Config::parse_on_cache_miss is enabled, parses the already-downloaded MRT.
+// Config::persist_realtime_parsed_cache controls whether that parse first
+// creates a permanent cache or streams directly without creating one. A
+// missing source MRT is always fatal.
 AnalysisInputTraversal traverse_analysis_input(const Config &config,
                                                 const std::filesystem::path &source_file,
                                                 BGPMessageFields fields,

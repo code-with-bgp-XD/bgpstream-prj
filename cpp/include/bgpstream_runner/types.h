@@ -49,6 +49,7 @@ struct Config {
     int parser_workers = kDefaultParserWorkers;
     int message_batch_size = kDefaultMessageBatchSize;
     bool parse_on_cache_miss = false;
+    bool persist_realtime_parsed_cache = false;
     int chunk_size = kDefaultChunkSize;
     ChunkUnit chunk_unit = ChunkUnit::Month;
     int limit = -1;

@@ -418,6 +418,7 @@ void FileProgressDisplay::close_locked() {
            << "  --parser-workers N\n"
            << "  --message-batch-size N\n"
            << "  --parse-on-cache-miss true|false\n"
+           << "  --persist-realtime-parsed-cache true|false\n"
            << "  --chunk-size N\n"
            << "  --chunk-unit day|month\n"
            << "  --log-phase-transitions true|false\n"
@@ -493,6 +494,15 @@ Config parse_args(int argc, char **argv) {
                 config.parse_on_cache_miss = false;
             } else {
                 throw std::runtime_error("--parse-on-cache-miss must be true or false");
+            }
+        } else if (arg == "--persist-realtime-parsed-cache") {
+            const std::string value = require_value("--persist-realtime-parsed-cache");
+            if (value == "true") {
+                config.persist_realtime_parsed_cache = true;
+            } else if (value == "false") {
+                config.persist_realtime_parsed_cache = false;
+            } else {
+                throw std::runtime_error("--persist-realtime-parsed-cache must be true or false");
             }
         } else if (arg == "--chunk-size") {
             config.chunk_size = std::stoi(require_value("--chunk-size"));

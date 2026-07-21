@@ -48,11 +48,14 @@ int main() {
 
     try {
         write_config(config_path,
-                     R"({"analysis":{"parse_on_cache_miss":true},"cache":{"output_dir":"data"}})");
+                     R"({"analysis":{"parse_on_cache_miss":true,)"
+                     R"("persist_realtime_parsed_cache":true},"cache":{"output_dir":"data"}})");
         Config enabled;
         apply_json_config_file(config_path, &enabled);
         require(enabled.parse_on_cache_miss,
                 "analysis.parse_on_cache_miss=true was not applied");
+        require(enabled.persist_realtime_parsed_cache,
+                "analysis.persist_realtime_parsed_cache=true was not applied");
 
         write_config(config_path,
                      R"({"analysis":{},"cache":{"output_dir":"data"}})");
@@ -60,6 +63,8 @@ int main() {
         apply_json_config_file(config_path, &default_config);
         require(!default_config.parse_on_cache_miss,
                 "analysis.parse_on_cache_miss did not default to false");
+        require(!default_config.persist_realtime_parsed_cache,
+                "analysis.persist_realtime_parsed_cache did not default to false");
 
         write_config(config_path,
                      R"({"analysis":{"parse_on_cache_miss":"true"},"cache":{"output_dir":"data"}})");
@@ -73,6 +78,20 @@ int main() {
         }
         require(wrong_type_rejected,
                 "non-boolean analysis.parse_on_cache_miss was accepted");
+
+        write_config(
+            config_path,
+            R"({"analysis":{"persist_realtime_parsed_cache":"true"},"cache":{"output_dir":"data"}})");
+        bool persist_wrong_type_rejected = false;
+        try {
+            Config invalid;
+            apply_json_config_file(config_path, &invalid);
+        } catch (const std::runtime_error &error) {
+            persist_wrong_type_rejected =
+                std::string(error.what()).find("persist_realtime_parsed_cache") != std::string::npos;
+        }
+        require(persist_wrong_type_rejected,
+                "non-boolean analysis.persist_realtime_parsed_cache was accepted");
 
         write_config(config_path,
                      R"({"analysis":{"max_cache_size_gb":5.0},"cache":{"output_dir":"data"}})");

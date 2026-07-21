@@ -153,6 +153,22 @@ int main(int argc, char **argv) {
             require(!std::filesystem::exists(parsed_cache_path(source_file)),
                     "realtime MRT parser unexpectedly generated a parsed cache");
 
+            config.persist_realtime_parsed_cache = true;
+            const AnalysisInputTraversal persisted = traverse_analysis_input(
+                config, source_file, BGPMessageFields::Type,
+                static_cast<std::size_t>(config.message_batch_size), std::nullopt,
+                [](std::vector<BGPMessage> &) {});
+            require(persisted.used_realtime_parser,
+                    "persisted cache miss did not use the realtime MRT parser");
+            require(persisted.stats.visited_messages == realtime.stats.visited_messages,
+                    "persisted cache miss returned different message statistics");
+            require(inspect_parsed_cache(source_file).state == ParsedCacheState::Valid,
+                    "persisted realtime parse did not generate a valid parsed cache");
+
+            config.persist_realtime_parsed_cache = false;
+            require(std::filesystem::remove(parsed_cache_path(source_file)),
+                    "failed to remove persisted cache before cache-generation tests");
+
             const ParsedCacheBuildSummary generated = ensure_parsed_caches(config, {source_file}, false);
             require(generated.generated_files == 1 && generated.reused_files == 0,
                     "real MRT was not parsed into a new cache");

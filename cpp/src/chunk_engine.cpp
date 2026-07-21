@@ -112,6 +112,7 @@ RangeProcessingStats ChunkEngine::run() {
     planned_chunks.reserve(chunks.size());
     std::size_t total_files = 0;
     std::uint64_t total_bytes = 0;
+    bool all_input_sizes_known = true;
     int remaining_limit = config_.limit;
     FileProgressDisplay plan_progress(chunks.size(), 0, "analysis-plan", "chunks", false);
     std::size_t completed_plan_chunks = 0;
@@ -143,7 +144,12 @@ RangeProcessingStats ChunkEngine::run() {
                                          target.destination_path.string() +
                                          ". Analysis mode never downloads data; run the download command first.");
             }
-            total_bytes += safe_file_size(parsed_cache_path(source_file));
+            const std::filesystem::path cache_file = parsed_cache_path(source_file);
+            if (std::filesystem::exists(cache_file)) {
+                total_bytes += safe_file_size(cache_file);
+            } else {
+                all_input_sizes_known = false;
+            }
             planned_chunk.source_files.push_back(std::move(source_file));
         }
 
@@ -165,7 +171,8 @@ RangeProcessingStats ChunkEngine::run() {
     std::unique_ptr<FileProgressDisplay> progress;
     if (total_files > 0) {
         progress = std::make_unique<FileProgressDisplay>(
-            total_files, total_bytes, config_.parse_on_cache_miss ? "analysis-input" : "parsed-cache");
+            total_files, total_bytes, config_.parse_on_cache_miss ? "analysis-input" : "parsed-cache",
+            "files", all_input_sizes_known);
     }
 
     for (const PlannedChunk &planned_chunk : planned_chunks) {
@@ -218,10 +225,17 @@ void ChunkEngine::print_summary(std::ostream &out, const RangeProcessingStats &s
     out << "end_date: " << config_.end_date << '\n';
     out << "collector: " << config_.collector << '\n';
     out << "data_dir: " << std::filesystem::absolute(data_dir).string() << '\n';
-    out << "input_mode: "
-        << (config_.parse_on_cache_miss ? "parsed-cache-with-realtime-mrt-fallback" : "parsed-cache-only")
-        << '\n';
+    out << "input_mode: ";
+    if (!config_.parse_on_cache_miss) {
+        out << "parsed-cache-only\n";
+    } else if (config_.persist_realtime_parsed_cache) {
+        out << "parsed-cache-with-persisted-on-demand-fallback\n";
+    } else {
+        out << "parsed-cache-with-realtime-mrt-fallback\n";
+    }
     out << "parse_on_cache_miss: " << (config_.parse_on_cache_miss ? "true" : "false") << '\n';
+    out << "persist_realtime_parsed_cache: "
+        << (config_.persist_realtime_parsed_cache ? "true" : "false") << '\n';
     out << "parsed_cache_schema_version: " << kParsedCacheSchemaVersion << '\n';
     out << "parsed_cache_order: timestamp-ascending-stable\n";
     out << "analysis_time_sorting: false\n";

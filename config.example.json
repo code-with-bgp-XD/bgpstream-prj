@@ -8,6 +8,7 @@
     "parser_workers": 8,
     "message_batch_size": 1048576,
     "parse_on_cache_miss": false,
+    "persist_realtime_parsed_cache": false,
     "chunk_size": 1,
     "chunk_unit": "day",
     "limit": -1,

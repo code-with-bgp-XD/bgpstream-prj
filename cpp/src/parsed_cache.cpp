@@ -1444,6 +1444,14 @@ AnalysisInputTraversal traverse_analysis_input(const Config &config,
                                  "during analysis.");
     }
 
+    if (config.persist_realtime_parsed_cache) {
+        generate_parsed_cache(config, source_file, message_batch_size);
+        return AnalysisInputTraversal{
+            read_parsed_cache(source_file, fields, message_batch_size, range, handle_batch),
+            true,
+        };
+    }
+
     return AnalysisInputTraversal{
         traverse_mrt_file(config, source_file, fields, message_batch_size, range, handle_batch),
         true,
