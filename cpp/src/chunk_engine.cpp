@@ -77,6 +77,52 @@ std::filesystem::path make_record_file_path() {
     return candidate;
 }
 
+std::optional<std::filesystem::path> local_source_path(const DownloadTarget &target) {
+    if (std::filesystem::exists(target.local_path)) {
+        return target.local_path;
+    }
+    if (std::filesystem::exists(target.destination_path)) {
+        return target.destination_path;
+    }
+    return std::nullopt;
+}
+
+std::vector<std::filesystem::path> require_local_source_files(
+    const std::vector<DownloadTarget> &targets) {
+    std::vector<std::filesystem::path> source_files;
+    source_files.reserve(targets.size());
+    for (const DownloadTarget &target : targets) {
+        const std::optional<std::filesystem::path> source_file = local_source_path(target);
+        if (!source_file.has_value()) {
+            throw std::runtime_error("Required source MRT is missing before chunk processing: " +
+                                     target.destination_path.string());
+        }
+        source_files.push_back(*source_file);
+    }
+    return source_files;
+}
+
+ParsedCacheInspection inspect_complete_parsed_cache(const std::filesystem::path &source_file) {
+    ParsedCacheInspection inspection;
+    inspection.cache_path = parsed_cache_path(source_file);
+    if (!std::filesystem::exists(inspection.cache_path)) {
+        inspection.state = ParsedCacheState::Missing;
+        inspection.reason = "parsed cache is missing";
+        return inspection;
+    }
+
+    try {
+        const std::optional<ClosedDateRange> empty_range = ClosedDateRange{};
+        (void)read_parsed_cache(source_file, BGPMessageFields::None, 1, empty_range,
+                                [](std::vector<BGPMessage> &) {});
+        inspection.state = ParsedCacheState::Valid;
+    } catch (const std::exception &error) {
+        inspection.state = ParsedCacheState::Invalid;
+        inspection.reason = error.what();
+    }
+    return inspection;
+}
+
 }  // namespace
 
 ChunkEngine::ChunkEngine(Config config, MessageProcessor &processor)
@@ -100,8 +146,8 @@ RangeProcessingStats ChunkEngine::run() {
     struct PlannedChunk {
         ClosedDateRange range;
         std::string label;
+        int limit_override = -1;
         std::vector<DownloadTarget> targets;
-        std::vector<std::filesystem::path> source_files;
     };
 
     if (config_.log_phase_transitions) {
@@ -112,7 +158,9 @@ RangeProcessingStats ChunkEngine::run() {
     planned_chunks.reserve(chunks.size());
     std::size_t total_files = 0;
     std::uint64_t total_bytes = 0;
-    bool all_input_sizes_known = true;
+    const bool recover_chunk_data =
+        config_.chunk_data_failure_action == ChunkDataFailureAction::DownloadAndParse;
+    bool all_input_sizes_known = !recover_chunk_data;
     int remaining_limit = config_.limit;
     FileProgressDisplay plan_progress(chunks.size(), 0, "analysis-plan", "chunks", false);
     std::size_t completed_plan_chunks = 0;
@@ -125,32 +173,30 @@ RangeProcessingStats ChunkEngine::run() {
         PlannedChunk planned_chunk;
         planned_chunk.range = chunk;
         planned_chunk.label = format_range_label(chunk);
+        planned_chunk.limit_override = remaining_limit;
         planned_chunk.targets = download_client_.collect_targets(chunk, remaining_limit);
-        planned_chunk.source_files.reserve(planned_chunk.targets.size());
 
         // Boundary resources can be traversed once per adjacent chunk because each
         // traversal applies a different time filter, so count every planned target.
         total_files += planned_chunk.targets.size();
         for (const DownloadTarget &target : planned_chunk.targets) {
-            // Raw MRT availability is checked for the complete plan before any
-            // message is delivered. Analysis mode never downloads missing data.
-            std::filesystem::path source_file;
-            if (std::filesystem::exists(target.local_path)) {
-                source_file = target.local_path;
-            } else if (std::filesystem::exists(target.destination_path)) {
-                source_file = target.destination_path;
-            } else {
+            const std::optional<std::filesystem::path> source_file = local_source_path(target);
+            if (!source_file.has_value()) {
+                all_input_sizes_known = false;
+                if (recover_chunk_data) {
+                    continue;
+                }
                 throw std::runtime_error("Required source MRT is missing: " +
                                          target.destination_path.string() +
-                                         ". Analysis mode never downloads data; run the download command first.");
+                                         ". Set analysis.chunk_data_failure_action to "
+                                         "'download_and_parse' to recover the chunk automatically.");
             }
-            const std::filesystem::path cache_file = parsed_cache_path(source_file);
+            const std::filesystem::path cache_file = parsed_cache_path(*source_file);
             if (std::filesystem::exists(cache_file)) {
                 total_bytes += safe_file_size(cache_file);
             } else {
                 all_input_sizes_known = false;
             }
-            planned_chunk.source_files.push_back(std::move(source_file));
         }
 
         if (remaining_limit > 0) {
@@ -170,17 +216,64 @@ RangeProcessingStats ChunkEngine::run() {
 
     std::unique_ptr<FileProgressDisplay> progress;
     if (total_files > 0) {
+        const bool may_use_realtime_parser =
+            config_.parse_on_cache_miss ||
+            (recover_chunk_data && !config_.persist_realtime_parsed_cache);
         progress = std::make_unique<FileProgressDisplay>(
-            total_files, total_bytes, config_.parse_on_cache_miss ? "analysis-input" : "parsed-cache",
+            total_files, total_bytes, may_use_realtime_parser ? "analysis-input" : "parsed-cache",
             "files", all_input_sizes_known);
     }
 
     for (const PlannedChunk &planned_chunk : planned_chunks) {
         const ClosedDateRange &chunk = planned_chunk.range;
         const std::string &chunk_label = planned_chunk.label;
-        const std::vector<std::filesystem::path> &source_files = planned_chunk.source_files;
+        const std::vector<DownloadTarget> &targets = planned_chunk.targets;
 
         increment_chunk_count();
+
+        if (recover_chunk_data) {
+            const std::size_t missing_source_files = static_cast<std::size_t>(
+                std::count_if(targets.begin(), targets.end(), [](const DownloadTarget &target) {
+                    return !local_source_path(target).has_value();
+                }));
+            if (missing_source_files > 0) {
+                if (config_.log_phase_transitions) {
+                    std::cout << "recover chunk download phase " << chunk_label << ": "
+                              << missing_source_files << " source file(s) missing" << std::endl;
+                }
+                download_client_.download_range(chunk, planned_chunk.limit_override, false);
+            }
+        }
+
+        const std::vector<std::filesystem::path> source_files = require_local_source_files(targets);
+
+        SourceFileSet force_realtime_parse_files;
+        if (recover_chunk_data) {
+            std::vector<std::filesystem::path> unavailable_caches;
+            for (const std::filesystem::path &source_file : source_files) {
+                if (inspect_complete_parsed_cache(source_file).state != ParsedCacheState::Valid) {
+                    unavailable_caches.push_back(source_file);
+                }
+            }
+            if (!unavailable_caches.empty()) {
+                if (config_.log_phase_transitions) {
+                    std::cout << "recover chunk parse phase " << chunk_label << ": "
+                              << unavailable_caches.size() << " cache file(s) missing or invalid; "
+                              << (config_.persist_realtime_parsed_cache
+                                      ? "rebuilding permanent caches"
+                                      : "parsing source MRTs without persisting new caches")
+                              << std::endl;
+                }
+                if (config_.persist_realtime_parsed_cache) {
+                    const ParsedCacheBuildSummary repairs =
+                        ensure_parsed_caches(config_, unavailable_caches, false, true);
+                    record_realtime_parsed_files(repairs.generated_files);
+                } else {
+                    force_realtime_parse_files.insert(unavailable_caches.begin(),
+                                                      unavailable_caches.end());
+                }
+            }
+        }
 
         if (source_files.empty()) {
             const RangeProcessingStats stats = current_stats();
@@ -192,10 +285,14 @@ RangeProcessingStats ChunkEngine::run() {
         }
 
         if (config_.log_phase_transitions) {
-            std::cout << "process " << (config_.parse_on_cache_miss ? "analysis-input" : "parsed-cache")
+            const bool uses_realtime_recovery = !force_realtime_parse_files.empty();
+            std::cout << "process "
+                      << (config_.parse_on_cache_miss || uses_realtime_recovery
+                              ? "analysis-input"
+                              : "parsed-cache")
                       << " phase " << chunk_label << std::endl;
         }
-        process_files(source_files, chunk, *progress);
+        process_files(source_files, chunk, *progress, force_realtime_parse_files);
 
         const RangeProcessingStats stats = current_stats();
         if (config_.log_chunk_summary) {
@@ -226,7 +323,11 @@ void ChunkEngine::print_summary(std::ostream &out, const RangeProcessingStats &s
     out << "collector: " << config_.collector << '\n';
     out << "data_dir: " << std::filesystem::absolute(data_dir).string() << '\n';
     out << "input_mode: ";
-    if (!config_.parse_on_cache_miss) {
+    if (config_.chunk_data_failure_action == ChunkDataFailureAction::DownloadAndParse) {
+        out << (config_.persist_realtime_parsed_cache
+                    ? "parsed-cache-with-persisted-chunk-recovery\n"
+                    : "parsed-cache-with-realtime-chunk-recovery\n");
+    } else if (!config_.parse_on_cache_miss) {
         out << "parsed-cache-only\n";
     } else if (config_.persist_realtime_parsed_cache) {
         out << "parsed-cache-with-persisted-on-demand-fallback\n";
@@ -236,10 +337,17 @@ void ChunkEngine::print_summary(std::ostream &out, const RangeProcessingStats &s
     out << "parse_on_cache_miss: " << (config_.parse_on_cache_miss ? "true" : "false") << '\n';
     out << "persist_realtime_parsed_cache: "
         << (config_.persist_realtime_parsed_cache ? "true" : "false") << '\n';
+    out << "chunk_data_failure_action: "
+        << (config_.chunk_data_failure_action == ChunkDataFailureAction::DownloadAndParse
+                ? "download_and_parse"
+                : "stop")
+        << '\n';
     out << "parsed_cache_schema_version: " << kParsedCacheSchemaVersion << '\n';
     out << "parsed_cache_order: timestamp-ascending-stable\n";
     out << "analysis_time_sorting: false\n";
-    out << "automatic_downloads: false\n";
+    out << "automatic_downloads: "
+        << (config_.chunk_data_failure_action == ChunkDataFailureAction::DownloadAndParse ? "true" : "false")
+        << '\n';
     out << "original_file_eviction: disabled\n";
     out << "parser_workers: " << config_.parser_workers << '\n';
     out << "processor_concurrent_message_handling: "
@@ -292,8 +400,10 @@ std::filesystem::path ChunkEngine::write_record_file(const RangeProcessingStats 
     return record_file_path_;
 }
 
-void ChunkEngine::process_files(const std::vector<std::filesystem::path> &files, const ClosedDateRange &chunk,
-                                FileProgressDisplay &progress) {
+void ChunkEngine::process_files(const std::vector<std::filesystem::path> &files,
+                                const ClosedDateRange &chunk,
+                                FileProgressDisplay &progress,
+                                const SourceFileSet &force_realtime_parse_files) {
     if (files.empty()) {
         return;
     }
@@ -324,10 +434,15 @@ void ChunkEngine::process_files(const std::vector<std::filesystem::path> &files,
                         break;
                     }
                     const auto &file_path = files[file_index];
+                    const bool force_realtime_parse =
+                        force_realtime_parse_files.find(file_path) != force_realtime_parse_files.end();
                     const FileTraversalResult file_result =
-                        traverse_single_file(file_path, chunk, processor_mutex_ptr);
+                        traverse_single_file(file_path, chunk, processor_mutex_ptr,
+                                             force_realtime_parse);
                     record_processed_file(file_result);
-                    progress.mark_batch_completed(1, safe_file_size(parsed_cache_path(file_path)));
+                    progress.mark_batch_completed(
+                        1, safe_file_size(force_realtime_parse ? file_path
+                                                               : parsed_cache_path(file_path)));
                 }
             } catch (...) {
                 std::lock_guard<std::mutex> lock(fatal_error_mutex);
@@ -348,7 +463,17 @@ void ChunkEngine::process_files(const std::vector<std::filesystem::path> &files,
 
 ChunkEngine::FileTraversalResult ChunkEngine::traverse_single_file(const std::filesystem::path &file_path,
                                                                    const ClosedDateRange &chunk,
-                                                                   std::mutex *processor_mutex) {
+                                                                   std::mutex *processor_mutex,
+                                                                   bool force_realtime_parse) {
+    if (force_realtime_parse) {
+        const MessageTraversalStats stats = traverse_mrt_file(
+            config_, file_path, message_fields_,
+            static_cast<std::size_t>(config_.message_batch_size), chunk,
+            [&](std::vector<BGPMessage> &messages) {
+                dispatch_message_batch(messages, processor_mutex);
+            });
+        return FileTraversalResult{stats, true};
+    }
     const AnalysisInputTraversal traversal = traverse_analysis_input(
         config_, file_path, message_fields_, static_cast<std::size_t>(config_.message_batch_size), chunk,
         [&](std::vector<BGPMessage> &messages) { dispatch_message_batch(messages, processor_mutex); });
@@ -415,6 +540,11 @@ void ChunkEngine::reset_stats() {
 void ChunkEngine::increment_chunk_count() {
     std::lock_guard<std::mutex> lock(stats_mutex_);
     stats_.chunk_count += 1;
+}
+
+void ChunkEngine::record_realtime_parsed_files(std::size_t file_count) {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    stats_.realtime_parsed_files += file_count;
 }
 
 void ChunkEngine::record_processed_file(const FileTraversalResult &file_result) {

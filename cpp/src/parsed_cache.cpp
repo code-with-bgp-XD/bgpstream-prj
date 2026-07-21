@@ -1427,8 +1427,8 @@ AnalysisInputTraversal traverse_analysis_input(const Config &config,
                                                 const std::optional<ClosedDateRange> &range,
                                                 const MessageBatchHandler &handle_batch) {
     if (!std::filesystem::exists(source_file)) {
-        throw MrtParseFailure("Required source MRT is missing: " + source_file.string() +
-                              ". Analysis mode never downloads data.");
+        throw MrtParseFailure("Required source MRT is missing during analysis: " +
+                              source_file.string());
     }
 
     const std::filesystem::path cache_path = parsed_cache_path(source_file);
@@ -1460,7 +1460,8 @@ AnalysisInputTraversal traverse_analysis_input(const Config &config,
 
 ParsedCacheBuildSummary ensure_parsed_caches(const Config &config,
                                              const std::vector<std::filesystem::path> &source_files,
-                                             bool show_progress) {
+                                             bool show_progress,
+                                             bool force_rebuild) {
     if (config.parser_workers < 1) {
         throw std::invalid_argument("parser_workers must be positive");
     }
@@ -1496,8 +1497,9 @@ ParsedCacheBuildSummary ensure_parsed_caches(const Config &config,
     for (const std::filesystem::path &source_file : unique_files) {
         const std::uint64_t source_size = require_source_size(source_file);
         summary.source_bytes += source_size;
-        const ParsedCacheInspection inspection = inspect_parsed_cache(source_file);
-        if (inspection.state == ParsedCacheState::Valid) {
+        const ParsedCacheInspection inspection =
+            force_rebuild ? ParsedCacheInspection{} : inspect_parsed_cache(source_file);
+        if (!force_rebuild && inspection.state == ParsedCacheState::Valid) {
             ++reusable_count;
             reusable_source_bytes += source_size;
             summary.cache_bytes += safe_file_size(inspection.cache_path);

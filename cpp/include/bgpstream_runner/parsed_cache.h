@@ -90,8 +90,11 @@ AnalysisInputTraversal traverse_analysis_input(const Config &config,
                                                 const std::optional<ClosedDateRange> &range,
                                                 const MessageBatchHandler &handle_batch);
 
+// `force_rebuild` regenerates every supplied cache instead of reusing a cache
+// whose header and source fingerprint are still valid.
 ParsedCacheBuildSummary ensure_parsed_caches(const Config &config,
                                              const std::vector<std::filesystem::path> &source_files,
-                                             bool show_progress = true);
+                                             bool show_progress = true,
+                                             bool force_rebuild = false);
 
 }  // namespace bgpstream_runner

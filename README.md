@@ -11,7 +11,7 @@
    下载模式使用 `libBGPStream` 将每个原始 MRT 文件完整解析一次，按 `(timestamp, timestamp_microseconds)` 和原始读取序号稳定排序，再写入带 schema 版本、源文件指纹、分块校验和的 `.bgpcache` 文件。系统存在 `libzstd.so.1` 时自动使用 Zstd 压缩，否则写入未压缩分块。
 
 3. C++ 分析中层 + 处理器插件
-   分析中层按配置切片，优先读取已经生成的 `.bgpcache`，按插件声明的字段投影为 `BGPMessage` 批次并交给上层处理器。默认情况下缓存缺失会终止；开启 `analysis.parse_on_cache_miss` 后，可以解析已经下载的原始 MRT，并通过 `analysis.persist_realtime_parsed_cache` 决定是否把解析结果永久保存为 `.bgpcache`。分析模式始终不会下载文件。
+   分析中层按配置切片，优先读取已经生成的 `.bgpcache`，按插件声明的字段投影为 `BGPMessage` 批次并交给上层处理器。默认情况下数据缺失或错误会终止；也可以通过 `analysis.chunk_data_failure_action` 让分析模式下载并解析当前 chunk 中缺失或损坏的数据。`analysis.persist_realtime_parsed_cache` 决定运行中解析出的结果是否永久保存。
    具体“怎么处理一批报文”由 `MessageProcessor` 插件决定，主程序在运行时动态加载处理器库。
 
 ---
@@ -28,10 +28,10 @@
    - 预解析使用磁盘排序临时文件，生成按时间升序稳定排列的 schema v2 缓存；完整结束后原子发布为 `.bgpcache`。
 3. `./manage.sh run` 使用 `analysis` 区块：
    - 按 `chunk_size + chunk_unit` 切分日期范围；
-   - 通过 `analysis-plan` 进度条显示资源发现与分片路径规划，并在处理消息前确认计划中的原始 MRT 均已下载；
+   - 通过 `analysis-plan` 进度条显示资源发现与分片路径规划；严格模式会在处理消息前确认计划中的原始 MRT 均已下载；
    - 按分片优先读取解析缓存；缓存缺失时根据 `analysis.parse_on_cache_miss` 选择终止或现场解析原始 MRT；
    - 现场解析时，根据 `analysis.persist_realtime_parsed_cache` 选择直接流式处理，或先原子生成永久 `.bgpcache` 再读取；
-   - 原始 MRT 缺失时无条件终止，分析模式绝不自动下载；已有但损坏或过期的解析缓存也会终止；
+   - `chunk_data_failure_action=download_and_parse` 时，在每个 chunk 开始前下载缺失的原始 MRT 并完整校验解析缓存；缺失、损坏和过期的缓存会按 `persist_realtime_parsed_cache` 选择永久重建或仅本次直接解析；恢复失败则终止；
    - 从解析缓存或实时 MRT 解析器读取消息，按 `required_message_fields()` 只物化插件需要的字段，再批量交给处理器。
 4. 所有分片完成后输出最终累计统计。每次分析运行使用一个 `log/rcd-*` 文件记录分片、成功或异常结果。
 
@@ -104,6 +104,7 @@ bgpdata/routeviews/route-views.sg/updates/
   - 解析线程数
   - 解析缓存缺失时是否实时解析原始 MRT
   - 是否永久保存实时解析生成的缓存
+  - chunk 数据异常时停止或自动下载并预解析
   - 批量处理大小
   - 日志开关
   - 下载条目限制
@@ -206,7 +207,7 @@ bgpdata/routeviews/route-views.sg/updates/
   - 在处理消息前确认计划中的原始文件均已下载
   - 优先读取解析缓存，并按配置决定缓存缺失时是否实时解析原始 MRT
   - 按配置决定是否把实时解析结果永久保存为解析缓存
-  - 不调用下载器下载文件
+  - 按配置在当前 chunk 内下载缺失的原始 MRT，并修复解析缓存
   - 逐文件恢复 RIB / announcement / withdrawal / peer-state / End-of-RIB 元素
   - 把报文打包成批次后交给处理器
   - 输出分片级和全局累计统计
@@ -432,7 +433,7 @@ cp config.example.json config.json
 - 当前处理器的业务统计结果
   具体字段取决于你当前加载的本地插件实现。
 
-缓存目录固定为 `cache.output_dir`。分析阶段不会下载或淘汰文件，并会在处理消息前检查原始 MRT 是否全部存在；任一原始文件缺失都会直接失败。程序按分片优先读取 `.bgpcache`：缓存缺失且 `analysis.parse_on_cache_miss=false` 时失败，设为 `true` 时现场解析已有 MRT。此时 `analysis.persist_realtime_parsed_cache=false` 会直接流式处理且不落盘；设为 `true` 会先原子生成完整 `.bgpcache`，供本次及后续分析复用。已有缓存内容损坏或源文件指纹不匹配仍会失败。下载阶段负责补齐原始文件并检查、生成或更新派生解析缓存。
+缓存目录固定为 `cache.output_dir`，程序不会自动淘汰文件。默认的 `analysis.chunk_data_failure_action=stop` 会在原始 MRT 缺失或已有解析缓存错误时失败；单纯缺少解析缓存仍由 `parse_on_cache_miss` 决定终止或现场解析。设为 `download_and_parse` 后，分析程序会在当前 chunk 开始处理消息前下载其中缺失的原始 MRT，并完整读取、校验已有 `.bgpcache`。缺失、损坏及过期的缓存会进入恢复流程：`persist_realtime_parsed_cache=true` 时原子重建为永久缓存，设为 `false` 时绕过错误缓存并直接解析原始 MRT，不写入新的解析缓存。该模式优先于 `parse_on_cache_miss`；下载、校验或解析失败时仍会终止。它不会静默覆盖已经存在但本身无法解析的原始 MRT。
 
 根目录下的 `manage.sh` 可以统一执行构建和缓存管理：
 
@@ -524,6 +525,7 @@ cp config.example.json config.json
     "message_batch_size": 1048576,
     "parse_on_cache_miss": false,
     "persist_realtime_parsed_cache": false,
+    "chunk_data_failure_action": "stop",
     "chunk_size": 1,
     "chunk_unit": "day",
     "limit": -1,
@@ -560,6 +562,7 @@ cp config.example.json config.json
 - `--processor-plugin NAME_OR_PATH`
 - `--parse-on-cache-miss true|false`
 - `--persist-realtime-parsed-cache true|false`
+- `--chunk-data-failure-action stop|download-and-parse`
 
 分片相关命令行参数：
 
@@ -577,6 +580,7 @@ cp config.example.json config.json
 - `message_batch_size`
 - `parse_on_cache_miss`
 - `persist_realtime_parsed_cache`
+- `chunk_data_failure_action`
 - `chunk_size`
 - `chunk_unit`
 - `limit`
@@ -635,10 +639,13 @@ cp config.example.json config.json
   中层交给处理器的单批报文数量。中层会先把报文聚成一个 `std::vector<BGPMessage>`，再调用一次处理器的 `handle_messages()`。
 
 - `analysis.parse_on_cache_miss`
-  布尔值，默认 `false`。为 `false` 时，所需 `.bgpcache` 缺失会立即终止分析；为 `true` 时，程序用 libBGPStream 现场解析已经下载的原始 MRT。此开关不允许自动下载，也不把损坏、过期或读取中失败的已有缓存静默切换为现场解析。
+  布尔值，默认 `false`。为 `false` 时，所需 `.bgpcache` 缺失会立即终止分析；为 `true` 时，程序用 libBGPStream 现场解析已经下载的原始 MRT。此开关本身不允许自动下载，也不把损坏、过期或读取中失败的已有缓存静默切换为现场解析。
 
 - `analysis.persist_realtime_parsed_cache`
-  布尔值，默认 `false`，只在 `parse_on_cache_miss=true` 且解析缓存缺失时生效。为 `false` 时，消息按 MRT 原始顺序直接流式交给插件，不生成永久缓存；要求严格时序的插件若发现逆序会终止运行。为 `true` 时，程序先生成经过稳定时间排序和完整校验的 `.bgpcache`，原子发布后再读取并交给插件；该缓存会跨运行保留，但仍可由 `cache-clear` 删除。生成过程中还会使用 `.bgpcache.sort.part` 和 `.bgpcache.part` 临时文件，因此应为临时文件与最终缓存预留足够磁盘空间。
+  布尔值，默认 `false`，在 `parse_on_cache_miss=true` 的缓存缺失回退，以及 `chunk_data_failure_action=download_and_parse` 的自动恢复中生效。为 `false` 时，消息按 MRT 原始顺序直接流式交给插件，不生成永久缓存；要求严格时序的插件若发现逆序会终止运行。为 `true` 时，程序先生成经过稳定时间排序和完整校验的 `.bgpcache`，原子发布后再读取并交给插件；该缓存会跨运行保留，但仍可由 `cache-clear` 删除。生成过程中还会使用 `.bgpcache.sort.part` 和 `.bgpcache.part` 临时文件，因此应为临时文件与最终缓存预留足够磁盘空间。
+
+- `analysis.chunk_data_failure_action`
+  字符串，默认 `stop`。`stop` 在原始 MRT 缺失或已有解析缓存错误时停止；仅缺少缓存时仍遵循 `parse_on_cache_miss`。`download_and_parse` 会在每个 chunk 开始前下载缺失的原始 MRT、完整校验已有缓存，并解析缺失、损坏及过期缓存对应的原始文件，完成后才向插件交付消息。此模式优先于 `parse_on_cache_miss`，但仍服从 `persist_realtime_parsed_cache`：设为 `true` 时并行重建永久缓存，设为 `false` 时仅在本次运行中直接解析。启用后每个 chunk 的已有缓存会多执行一次完整校验读取，安全性更高，但会增加磁盘 I/O；任何下载或恢复失败都会终止运行。
 
 - `analysis.chunk_size`
   分片大小数值。它和 `chunk_unit` 一起决定切片粒度。
@@ -675,6 +682,7 @@ cp config.example.json config.json
 - `input_mode`
 - `parse_on_cache_miss`
 - `persist_realtime_parsed_cache`
+- `chunk_data_failure_action`
 - `realtime_parsed_files`
 - `processor_concurrent_message_handling`
 - `processor_strict_chronological_order`

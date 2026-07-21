@@ -176,6 +176,11 @@ int main(int argc, char **argv) {
             require(reused.generated_files == 0 && reused.reused_files == 1,
                     "valid real MRT cache was not reused");
 
+            const ParsedCacheBuildSummary forced =
+                ensure_parsed_caches(config, {source_file}, false, true);
+            require(forced.generated_files == 1 && forced.reused_files == 0,
+                    "forced parsed-cache rebuild reused the existing cache");
+
             const std::filesystem::path cache_file = parsed_cache_path(source_file);
             std::filesystem::resize_file(cache_file, std::filesystem::file_size(cache_file) - 8);
             const ParsedCacheBuildSummary regenerated =

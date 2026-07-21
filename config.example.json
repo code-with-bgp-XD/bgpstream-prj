@@ -9,6 +9,7 @@
     "message_batch_size": 1048576,
     "parse_on_cache_miss": false,
     "persist_realtime_parsed_cache": false,
+    "chunk_data_failure_action": "stop",
     "chunk_size": 1,
     "chunk_unit": "day",
     "limit": -1,

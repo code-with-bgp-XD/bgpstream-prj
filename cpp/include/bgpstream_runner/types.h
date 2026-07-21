@@ -26,6 +26,11 @@ enum class ChunkUnit {
     Month,
 };
 
+enum class ChunkDataFailureAction {
+    Stop,
+    DownloadAndParse,
+};
+
 struct CacheConfig {
     std::string start_date = kDefaultStartDate;
     std::string end_date = kDefaultEndDate;
@@ -50,6 +55,7 @@ struct Config {
     int message_batch_size = kDefaultMessageBatchSize;
     bool parse_on_cache_miss = false;
     bool persist_realtime_parsed_cache = false;
+    ChunkDataFailureAction chunk_data_failure_action = ChunkDataFailureAction::Stop;
     int chunk_size = kDefaultChunkSize;
     ChunkUnit chunk_unit = ChunkUnit::Month;
     int limit = -1;

@@ -7,6 +7,7 @@
 #include <optional>
 #include <ostream>
 #include <string_view>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -31,6 +32,7 @@ class ChunkEngine {
 
    private:
     using MessageTimestamp = std::pair<std::time_t, std::uint32_t>;
+    using SourceFileSet = std::unordered_set<std::filesystem::path>;
 
     struct FileTraversalResult {
         MessageTraversalStats stats;
@@ -38,12 +40,16 @@ class ChunkEngine {
     };
 
     void process_files(const std::vector<std::filesystem::path> &files, const ClosedDateRange &chunk,
-                       FileProgressDisplay &progress);
+                       FileProgressDisplay &progress,
+                       const SourceFileSet &force_realtime_parse_files);
     FileTraversalResult traverse_single_file(const std::filesystem::path &file_path,
-                                             const ClosedDateRange &chunk, std::mutex *processor_mutex);
+                                             const ClosedDateRange &chunk,
+                                             std::mutex *processor_mutex,
+                                             bool force_realtime_parse);
     void dispatch_message_batch(std::vector<BGPMessage> &messages, std::mutex *processor_mutex);
     void reset_stats();
     void increment_chunk_count();
+    void record_realtime_parsed_files(std::size_t file_count);
     void record_processed_file(const FileTraversalResult &file_result);
 
     Config config_;

@@ -49,13 +49,17 @@ int main() {
     try {
         write_config(config_path,
                      R"({"analysis":{"parse_on_cache_miss":true,)"
-                     R"("persist_realtime_parsed_cache":true},"cache":{"output_dir":"data"}})");
+                     R"("persist_realtime_parsed_cache":true,)"
+                     R"("chunk_data_failure_action":"download_and_parse"},)"
+                     R"("cache":{"output_dir":"data"}})");
         Config enabled;
         apply_json_config_file(config_path, &enabled);
         require(enabled.parse_on_cache_miss,
                 "analysis.parse_on_cache_miss=true was not applied");
         require(enabled.persist_realtime_parsed_cache,
                 "analysis.persist_realtime_parsed_cache=true was not applied");
+        require(enabled.chunk_data_failure_action == ChunkDataFailureAction::DownloadAndParse,
+                "analysis.chunk_data_failure_action=download_and_parse was not applied");
 
         write_config(config_path,
                      R"({"analysis":{},"cache":{"output_dir":"data"}})");
@@ -65,6 +69,8 @@ int main() {
                 "analysis.parse_on_cache_miss did not default to false");
         require(!default_config.persist_realtime_parsed_cache,
                 "analysis.persist_realtime_parsed_cache did not default to false");
+        require(default_config.chunk_data_failure_action == ChunkDataFailureAction::Stop,
+                "analysis.chunk_data_failure_action did not default to stop");
 
         write_config(config_path,
                      R"({"analysis":{"parse_on_cache_miss":"true"},"cache":{"output_dir":"data"}})");
@@ -92,6 +98,20 @@ int main() {
         }
         require(persist_wrong_type_rejected,
                 "non-boolean analysis.persist_realtime_parsed_cache was accepted");
+
+        write_config(
+            config_path,
+            R"({"analysis":{"chunk_data_failure_action":"retry"},"cache":{"output_dir":"data"}})");
+        bool invalid_failure_action_rejected = false;
+        try {
+            Config invalid;
+            apply_json_config_file(config_path, &invalid);
+        } catch (const std::runtime_error &error) {
+            invalid_failure_action_rejected =
+                std::string(error.what()).find("chunk_data_failure_action") != std::string::npos;
+        }
+        require(invalid_failure_action_rejected,
+                "invalid analysis.chunk_data_failure_action was accepted");
 
         write_config(config_path,
                      R"({"analysis":{"max_cache_size_gb":5.0},"cache":{"output_dir":"data"}})");

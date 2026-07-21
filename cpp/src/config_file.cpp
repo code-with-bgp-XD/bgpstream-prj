@@ -331,6 +331,18 @@ class JsonConfigParser {
         throw std::runtime_error("Config key '" + key + "' must be 'day' or 'month'");
     }
 
+    ChunkDataFailureAction require_chunk_data_failure_action(const std::string &key,
+                                                              const JsonScalar &value) const {
+        const std::string text = require_string(key, value);
+        if (text == "stop") {
+            return ChunkDataFailureAction::Stop;
+        }
+        if (text == "download_and_parse") {
+            return ChunkDataFailureAction::DownloadAndParse;
+        }
+        throw std::runtime_error("Config key '" + key + "' must be 'stop' or 'download_and_parse'");
+    }
+
     void apply_analysis_value(const std::string &key, const JsonScalar &value) {
         if (key == "start_date") {
             config_->start_date = require_string(key, value);
@@ -350,6 +362,8 @@ class JsonConfigParser {
             config_->parse_on_cache_miss = require_bool(key, value);
         } else if (key == "persist_realtime_parsed_cache") {
             config_->persist_realtime_parsed_cache = require_bool(key, value);
+        } else if (key == "chunk_data_failure_action") {
+            config_->chunk_data_failure_action = require_chunk_data_failure_action(key, value);
         } else if (key == "chunk_size") {
             config_->chunk_size = require_int(key, value);
         } else if (key == "chunk_unit") {
